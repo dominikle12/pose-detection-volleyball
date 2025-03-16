@@ -36,7 +36,7 @@ def ffprobe(file_path) -> FFProbeResult:
 
 # openpose setup
 from src import model
-from src import util
+from src import util_fast
 from src.body import Body
 from src.hand import Hand
 
@@ -47,16 +47,16 @@ def process_frame(frame, body=True, hands=True):
     canvas = copy.deepcopy(frame)
     if body:
         candidate, subset = body_estimation(frame)
-        canvas = util.draw_bodypose(canvas, candidate, subset)
+        canvas = util_fast.draw_bodypose(canvas, candidate, subset)
     if hands:
-        hands_list = util.handDetect(candidate, subset, frame)
+        hands_list = util_fast.handDetect(candidate, subset, frame)
         all_hand_peaks = []
         for x, y, w, is_left in hands_list:
             peaks = hand_estimation(frame[y:y+w, x:x+w, :])
             peaks[:, 0] = np.where(peaks[:, 0]==0, peaks[:, 0], peaks[:, 0]+x)
             peaks[:, 1] = np.where(peaks[:, 1]==0, peaks[:, 1], peaks[:, 1]+y)
             all_hand_peaks.append(peaks)
-        canvas = util.draw_handpose(canvas, all_hand_peaks)
+        canvas = util_fast.draw_handpose(canvas, all_hand_peaks)
     return canvas
 
 # writing video with ffmpeg because cv2 writer failed

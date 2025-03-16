@@ -35,7 +35,11 @@ def padRightDownCorner(img, stride, padValue):
 def transfer(model, model_weights):
     transfered_model_weights = {}
     for weights_name in model.state_dict().keys():
-        transfered_model_weights[weights_name] = model_weights['.'.join(weights_name.split('.')[1:])]
+        key = '.'.join(weights_name.split('.')[1:])
+        if key in model_weights:
+            transfered_model_weights[weights_name] = model_weights[key]
+        else:
+            print(f"Warning: {key} not found in model weights")
     return transfered_model_weights
 
 # draw the body keypoint and lims
