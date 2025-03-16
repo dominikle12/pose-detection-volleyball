@@ -10,14 +10,14 @@ import torch
 from skimage.measure import label
 
 from src.model import handpose_model
-from src import util
+from src import util_fast
 
 class Hand(object):
     def __init__(self, model_path):
         self.model = handpose_model()
         if torch.cuda.is_available():
             self.model = self.model.cuda()
-        model_dict = util.transfer(self.model, torch.load(model_path))
+        model_dict = util_fast.transfer(self.model, torch.load(model_path))
         self.model.load_state_dict(model_dict)
         self.model.eval()
 
@@ -35,7 +35,7 @@ class Hand(object):
         for m in range(len(multiplier)):
             scale = multiplier[m]
             imageToTest = cv2.resize(oriImg, (0, 0), fx=scale, fy=scale, interpolation=cv2.INTER_CUBIC)
-            imageToTest_padded, pad = util.padRightDownCorner(imageToTest, stride, padValue)
+            imageToTest_padded, pad = util_fast.padRightDownCorner(imageToTest, stride, padValue)
             im = np.transpose(np.float32(imageToTest_padded[:, :, :, np.newaxis]), (3, 2, 0, 1)) / 256 - 0.5
             im = np.ascontiguousarray(im)
 
@@ -69,7 +69,7 @@ class Hand(object):
             label_img[label_img != max_index] = 0
             map_ori[label_img == 0] = 0
 
-            y, x = util.npmax(map_ori)
+            y, x = util_fast.npmax(map_ori)
             all_peaks.append([x, y])
         return np.array(all_peaks)
 
@@ -80,6 +80,6 @@ if __name__ == "__main__":
     test_image = '../images/hand.jpg'
     oriImg = cv2.imread(test_image)  # B,G,R order
     peaks = hand_estimation(oriImg)
-    canvas = util.draw_handpose(oriImg, peaks, True)
+    canvas = util_fast.draw_handpose(oriImg, peaks, True)
     cv2.imshow('', canvas)
     cv2.waitKey(0)

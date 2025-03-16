@@ -1,0 +1,2 @@
+OpenCV version: 4.11.0
+OpenCV built with GUI support: False
