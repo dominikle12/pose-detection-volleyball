@@ -1,0 +1,743 @@
+import cv2
+import copy
+import numpy as np
+import torch
+import time
+import threading
+import queue
+import os
+
+from src import util_fast
+from src.body_fast import Body
+
+# Performance configuration
+KEYPOINT_CONFIDENCE_THRESHOLD = 0.1  # Lowered threshold for detection
+POSE_SKIP_FRAMES = 2  # Process every other frame for better performance
+RENDER_SKIP_FRAMES = 1  # Show all frames for visual feedback
+USE_LOWER_RESOLUTION = True  # Process smaller images for faster detection
+DETECTION_SCALE_FACTOR = 0.5  # Scale down images by this factor for detection
+
+# Ball physics constants
+BALL_RADIUS = 20
+GRAVITY = 0.9  # Strong gravity
+ELASTICITY = 0.7  # Reduced elasticity for more realistic bounces
+FRICTION = 0.98  # Friction coefficient
+ARM_COLLISION_PADDING = 10  # Distance beyond ball radius for arm collision detection
+
+# Debug flags
+DEBUG_MODE = False  # Set to True for detailed debugging info
+REDUCED_MODEL_PRECISION = True  # Use FP16 precision if available with torch.amp
+DISPLAY_KEYPOINTS = True  # Set to False for even better performance
+
+print(f"Starting ball physics demo with optimized settings...")
+
+# Initialize body estimation with optimized settings
+try:
+    body_estimation = Body('model/body_coco.pth')
+    print("Pose estimation model loaded successfully")
+except Exception as e:
+    print(f"Error loading pose model: {e}")
+    print("Make sure the model file exists in the 'model' directory")
+    exit(1)
+
+# If CUDA is available, use it and optimize further
+if torch.cuda.is_available():
+    print(f"Using CUDA: {torch.cuda.get_device_name()}")
+    # Set CUDA optimization parameters
+    torch.backends.cudnn.benchmark = True
+    torch.backends.cudnn.deterministic = False
+    
+    # Try to use mixed precision for better performance
+    if REDUCED_MODEL_PRECISION:
+        try:
+            if hasattr(torch, 'amp') and hasattr(torch.amp, 'autocast'):
+                print("Enabling mixed precision with torch.amp")
+        except Exception as e:
+            print(f"Could not configure mixed precision: {e}")
+else:
+    print("CUDA not available, running on CPU")
+
+# Set lower process priority to avoid slowing down the system
+try:
+    import psutil
+    process = psutil.Process(os.getpid())
+    process.nice(psutil.BELOW_NORMAL_PRIORITY_CLASS if os.name == 'nt' else 10)
+    print("Set process to lower priority to avoid system slowdowns")
+except ImportError:
+    print("psutil not installed, skipping process priority adjustment")
+except Exception as e:
+    print(f"Could not adjust process priority: {e}")
+
+# Initialize camera and get resolution
+print("Initializing camera...")
+cap = cv2.VideoCapture(0)
+
+# Check if camera opened successfully
+if not cap.isOpened():
+    print("Error: Could not open camera")
+    exit(1)
+
+# Set camera properties for better performance
+cap.set(cv2.CAP_PROP_FPS, 30)
+cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
+try:
+    cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*'MJPG'))
+except:
+    print("Could not set MJPG format, using default")
+
+# Get the first frame to determine actual camera resolution
+ret, test_frame = cap.read()
+if not ret:
+    print("Error: Could not read frame from camera")
+    cap.release()
+    exit(1)
+
+# Set canvas dimensions from actual camera resolution
+CANVAS_WIDTH = test_frame.shape[1]
+CANVAS_HEIGHT = test_frame.shape[0]
+print(f"Camera resolution: {CANVAS_WIDTH}x{CANVAS_HEIGHT}")
+
+# Detection resolution (lower for faster processing)
+if USE_LOWER_RESOLUTION:
+    DETECTION_WIDTH = int(CANVAS_WIDTH * DETECTION_SCALE_FACTOR)
+    DETECTION_HEIGHT = int(CANVAS_HEIGHT * DETECTION_SCALE_FACTOR)
+    print(f"Using scaled detection resolution: {DETECTION_WIDTH}x{DETECTION_HEIGHT}")
+else:
+    DETECTION_WIDTH = CANVAS_WIDTH
+    DETECTION_HEIGHT = CANVAS_HEIGHT
+
+# Ball state variables - initialize at center of screen
+ball_pos = np.array([CANVAS_WIDTH // 2, CANVAS_HEIGHT // 2], dtype=np.float32)
+ball_velocity = np.array([0, 0], dtype=np.float32)
+floor_y = CANVAS_HEIGHT - 1  # Floor at bottom of screen
+ball_active = False
+ball_on_ground = False
+ground_contact_time = 0
+
+# Time tracking for physics
+previous_time = time.time()
+fixed_time_step = 1/60.0  # Target 60 physics updates per second
+accumulated_time = 0.0
+
+# Pose detection tracking
+frame_count = 0
+last_valid_keypoints = None
+
+# FPS calculation variables
+fps_update_interval = 1.0
+fps_last_update = time.time()
+fps_frame_count = 0
+current_fps = 0
+
+# Thread-safe queues for pose estimation
+pose_queue = queue.Queue(maxsize=1)
+pose_result_queue = queue.Queue(maxsize=2)  # Buffer for results
+pose_thread_running = False
+pose_result = None
+
+# Track position history for better collision detection
+last_arm_positions = []
+ARM_HISTORY_LENGTH = 3
+
+# Physics counters for debug
+physics_counter = 0
+physics_rate = 0
+
+# Shared state to indicate when a new result is ready
+new_pose_result = False
+
+def point_to_segment_distance(p, v, w):
+    """
+    Calculate the minimum distance from point p to line segment vw
+    Returns the distance and the closest point on the segment
+    
+    p: point (ball position) as a numpy array [x, y]
+    v: segment start point as a numpy array [x, y]
+    w: segment end point as a numpy array [x, y]
+    """
+    # Convert all inputs to float32 to ensure consistent calculations
+    p = p.astype(np.float32)
+    v = v.astype(np.float32)
+    w = w.astype(np.float32)
+    
+    # Vector from v to w
+    segment_vector = w - v
+    
+    # Vector from v to p
+    point_vector = p - v
+    
+    # Calculate squared length of segment
+    segment_length_squared = np.dot(segment_vector, segment_vector)
+    
+    # If segment is essentially a point, return distance to v
+    if segment_length_squared < 1e-6:
+        return np.linalg.norm(p - v), v
+    
+    # Calculate projection of point_vector onto segment_vector
+    projection_ratio = np.dot(point_vector, segment_vector) / segment_length_squared
+    
+    # Clamp projection to segment (0 to 1)
+    projection_ratio = max(0, min(1, projection_ratio))
+    
+    # Find closest point on segment
+    closest_point = v + projection_ratio * segment_vector
+    
+    # Calculate distance from p to closest_point
+    distance = np.linalg.norm(p - closest_point)
+    
+    return distance, closest_point
+
+def reset_ball(center_x=None, center_y=None):
+    """Reset the ball to the given position or screen center"""
+    global ball_pos, ball_velocity, ball_active, ball_on_ground
+    
+    if center_x is None or center_y is None:
+        center_x, center_y = CANVAS_WIDTH // 2, CANVAS_HEIGHT // 2
+    
+    ball_pos = np.array([center_x, center_y], dtype=np.float32)
+    ball_velocity = np.array([0, 0], dtype=np.float32)
+    ball_active = False
+    ball_on_ground = False
+    
+    if DEBUG_MODE:
+        print(f"Ball reset to position: ({ball_pos[0]}, {ball_pos[1]})")
+
+def check_wall_collision():
+    """Check and handle collisions with screen boundaries"""
+    global ball_pos, ball_velocity, ball_on_ground, ground_contact_time
+    collision_happened = False
+    
+    # Debug output
+    if DEBUG_MODE:
+        print(f"Ball position before collision check: ({ball_pos[0]:.1f}, {ball_pos[1]:.1f})")
+    
+    # Check left wall collision
+    if ball_pos[0] - BALL_RADIUS < 0:
+        ball_pos[0] = BALL_RADIUS + 1
+        ball_velocity[0] = abs(ball_velocity[0]) * ELASTICITY
+        collision_happened = True
+        if DEBUG_MODE:
+            print("Left wall collision")
+    
+    # Check right wall collision
+    elif ball_pos[0] + BALL_RADIUS > CANVAS_WIDTH:
+        ball_pos[0] = CANVAS_WIDTH - BALL_RADIUS - 1
+        ball_velocity[0] = -abs(ball_velocity[0]) * ELASTICITY
+        collision_happened = True
+        if DEBUG_MODE:
+            print("Right wall collision")
+    
+    # Check ceiling collision
+    if ball_pos[1] - BALL_RADIUS < 0:
+        ball_pos[1] = BALL_RADIUS + 1
+        ball_velocity[1] = abs(ball_velocity[1]) * ELASTICITY
+        collision_happened = True
+        if DEBUG_MODE:
+            print("Ceiling collision")
+    
+    # Check floor collision - use bottom of ball
+    bottom_edge = ball_pos[1] + BALL_RADIUS
+    
+    if bottom_edge >= floor_y:
+        # Position the ball exactly at the floor
+        ball_pos[1] = floor_y - BALL_RADIUS
+        
+        # Handle bouncing vs. resting
+        if ball_velocity[1] > 0.1:  # Moving downward with some speed
+            # Bounce with elasticity and extra damping
+            ball_velocity[1] = -abs(ball_velocity[1]) * ELASTICITY * 0.8
+            ball_velocity[0] *= 0.9  # Horizontal damping on bounce
+            collision_happened = True
+            ball_on_ground = True
+            ground_contact_time = time.time()
+            if DEBUG_MODE:
+                print("Floor bounce collision")
+        else:
+            # Ball is on the ground with low velocity
+            ball_on_ground = True
+            ground_contact_time = time.time()
+            
+            # Apply floor friction
+            ball_velocity[0] *= 0.9  # Strong horizontal friction on ground
+            if abs(ball_velocity[0]) < 0.1:  # Almost stopped horizontally
+                ball_velocity[0] = 0  # Stop completely
+                
+            # Make sure vertical velocity isn't pushing down into floor
+            if ball_velocity[1] > 0:
+                ball_velocity[1] = 0
+    else:
+        # Ball is not on the ground
+        if time.time() - ground_contact_time > 0.1:  # If ball has been off ground for a while
+            ball_on_ground = False
+    
+    # Cap velocity if collision occurred
+    if collision_happened:
+        max_velocity = 15.0  # Max velocity limit
+        current_magnitude = np.linalg.norm(ball_velocity)
+        if current_magnitude > max_velocity:
+            ball_velocity = (ball_velocity / current_magnitude) * max_velocity
+        
+        if DEBUG_MODE:
+            print(f"Ball position after collision: ({ball_pos[0]:.1f}, {ball_pos[1]:.1f})")
+            print(f"New velocity: ({ball_velocity[0]:.1f}, {ball_velocity[1]:.1f})")
+    
+    return collision_happened
+
+def update_physics(delta_time):
+    """Update ball physics for one time step"""
+    global ball_pos, ball_velocity, ball_active, ball_on_ground
+    
+    if not ball_active:
+        return False
+    
+    # Apply physics only if the ball is active
+    if not ball_on_ground:
+        # Apply gravity only when ball is not on the ground
+        ball_velocity[1] += GRAVITY
+    
+    # Apply friction to slow down over time
+    ball_velocity *= FRICTION
+    
+    # If ball is on ground with almost no velocity, stop it completely
+    if ball_on_ground and np.linalg.norm(ball_velocity) < 0.2:
+        ball_velocity = np.array([0, 0], dtype=np.float32)
+    
+    # Update position based on velocity and delta time (scaled for 60fps physics)
+    ball_pos += ball_velocity * delta_time * 60.0
+    
+    # Check for wall collisions
+    collision = check_wall_collision()
+    
+    return collision
+
+def scale_keypoints(candidate, subset, scale_factor=1.0):
+    """Scale keypoints coordinates if detection was done at a different resolution"""
+    if scale_factor == 1.0:
+        return candidate, subset
+    
+    # Create a copy to avoid modifying the original
+    scaled_candidate = copy.deepcopy(candidate)
+    
+    # Scale the x,y coordinates
+    for i in range(len(scaled_candidate)):
+        scaled_candidate[i][0] = scaled_candidate[i][0] * scale_factor
+        scaled_candidate[i][1] = scaled_candidate[i][1] * scale_factor
+    
+    return scaled_candidate, subset
+
+def check_arm_collision(candidate, subset):
+    """Check for collisions between the ball and arm segments"""
+    global ball_pos, ball_velocity, ball_active, ball_on_ground, last_arm_positions
+    
+    # Need valid candidates and subsets
+    if candidate is None or subset is None or len(candidate) == 0 or subset.shape[0] == 0:
+        return False
+    
+    collision_happened = False
+    
+    # Collect arm segments from all detected people
+    arm_segments = []
+    
+    # Process all detected people
+    for person_idx in range(len(subset)):
+        # Check right arm (elbow to wrist) - COCO indices are 0-based in array
+        right_elbow_idx = int(subset[person_idx][3]) 
+        right_wrist_idx = int(subset[person_idx][4])
+        
+        if (right_elbow_idx != -1 and right_wrist_idx != -1 and 
+            right_elbow_idx < len(candidate) and right_wrist_idx < len(candidate)):
+            if (candidate[right_elbow_idx][2] > KEYPOINT_CONFIDENCE_THRESHOLD and 
+                candidate[right_wrist_idx][2] > KEYPOINT_CONFIDENCE_THRESHOLD):
+                # Get coordinates
+                elbow_x, elbow_y = candidate[right_elbow_idx][0], candidate[right_elbow_idx][1]
+                wrist_x, wrist_y = candidate[right_wrist_idx][0], candidate[right_wrist_idx][1]
+                
+                arm_segments.append(
+                    ("right_lower", 
+                     np.array([elbow_x, elbow_y]), 
+                     np.array([wrist_x, wrist_y]))
+                )
+        
+        # Check left arm (elbow to wrist) - COCO indices are 0-based in array
+        left_elbow_idx = int(subset[person_idx][6])
+        left_wrist_idx = int(subset[person_idx][7])
+        
+        if (left_elbow_idx != -1 and left_wrist_idx != -1 and 
+            left_elbow_idx < len(candidate) and left_wrist_idx < len(candidate)):
+            if (candidate[left_elbow_idx][2] > KEYPOINT_CONFIDENCE_THRESHOLD and 
+                candidate[left_wrist_idx][2] > KEYPOINT_CONFIDENCE_THRESHOLD):
+                # Get coordinates
+                elbow_x, elbow_y = candidate[left_elbow_idx][0], candidate[left_elbow_idx][1]
+                wrist_x, wrist_y = candidate[left_wrist_idx][0], candidate[left_wrist_idx][1]
+                
+                arm_segments.append(
+                    ("left_lower", 
+                     np.array([elbow_x, elbow_y]), 
+                     np.array([wrist_x, wrist_y]))
+                )
+    
+    # Add current arm positions to history
+    if arm_segments:
+        last_arm_positions.append(arm_segments)
+        # Maintain history length
+        if len(last_arm_positions) > ARM_HISTORY_LENGTH:
+            last_arm_positions.pop(0)
+    
+    # Check all recent arm positions to detect fast movements
+    for positions in last_arm_positions:
+        for name, start, end in positions:
+            # Calculate distance from ball to arm segment
+            distance, closest_point = point_to_segment_distance(ball_pos, start, end)
+            
+            # Check if close enough for collision
+            collision_threshold = BALL_RADIUS + ARM_COLLISION_PADDING
+            
+            if DEBUG_MODE:
+                print(f"Distance to {name}: {distance:.1f}, threshold: {collision_threshold}")
+            
+            if distance < collision_threshold:
+                # Activate the ball if it's not already active
+                if not ball_active:
+                    print(f"Ball activated by {name} arm hit!")
+                    ball_active = True
+                
+                # Calculate arm segment direction for velocity influence
+                segment_vector = end - start
+                segment_length = np.linalg.norm(segment_vector)
+                
+                if segment_length > 0:  # Prevent division by zero
+                    # Get normalized vectors
+                    segment_unit_vector = segment_vector / segment_length
+                    
+                    # Normal to the arm segment (perpendicular)
+                    normal_vector = np.array([-segment_unit_vector[1], segment_unit_vector[0]])
+                    
+                    # Vector from closest point to ball
+                    ball_to_arm_vector = ball_pos - closest_point
+                    ball_to_arm_length = np.linalg.norm(ball_to_arm_vector)
+                    
+                    if ball_to_arm_length > 0:
+                        ball_to_arm_vector = ball_to_arm_vector / ball_to_arm_length
+                    else:
+                        ball_to_arm_vector = normal_vector  # Fallback
+                    
+                    # Calculate proper reflection
+                    dot_product = np.dot(ball_velocity, normal_vector)
+                    reflection = ball_velocity - 2 * dot_product * normal_vector
+                    
+                    # Apply reflection with elasticity
+                    ball_velocity = reflection * ELASTICITY
+                    
+                    # Add "hit force" based on arm segment direction
+                    arm_force = 8.0  # Strong force for forearm/wrist
+                    
+                    # Apply force in direction away from arm
+                    ball_velocity += ball_to_arm_vector * arm_force
+                    
+                    # Move ball slightly away from arm to prevent multiple collisions
+                    ball_pos += ball_to_arm_vector * 5
+                    
+                    # Ball is no longer on ground after being hit
+                    ball_on_ground = False
+                    
+                    collision_happened = True
+                    break  # Only process one collision per frame
+        
+        if collision_happened:
+            break
+    
+    return collision_happened
+
+def pose_estimation_thread_func():
+    """Background thread function for pose estimation"""
+    global pose_thread_running, pose_result, new_pose_result
+    
+    print("Pose estimation thread started")
+    while pose_thread_running:
+        try:
+            # Get the next frame from the queue with a timeout
+            try:
+                img = pose_queue.get(timeout=0.5)
+            except queue.Empty:
+                continue
+            
+            # Check if the image is valid
+            if img is None or img.size == 0 or img.shape[0] == 0 or img.shape[1] == 0:
+                print("Warning: Empty image in pose thread")
+                continue
+            
+            # Check if we need to resize for detection
+            if USE_LOWER_RESOLUTION:
+                # Resize for faster processing
+                processed_img = cv2.resize(img, (DETECTION_WIDTH, DETECTION_HEIGHT))
+            else:
+                processed_img = img
+                
+            # Run pose estimation
+            candidate, subset = body_estimation(processed_img)
+            
+            # Scale keypoints back to original size if needed
+            if USE_LOWER_RESOLUTION:
+                scale_factor = CANVAS_WIDTH / DETECTION_WIDTH
+                candidate, subset = scale_keypoints(candidate, subset, scale_factor)
+            
+            # Put the result in the result queue
+            try:
+                # Use non-blocking put and clear old items if queue is full
+                if pose_result_queue.full():
+                    try:
+                        pose_result_queue.get_nowait()  # Remove old result
+                    except queue.Empty:
+                        pass
+                pose_result_queue.put_nowait((candidate, subset))
+                new_pose_result = True
+            except queue.Full:
+                pass  # Skip this frame if queue is still full
+            
+        except Exception as e:
+            print(f"Error in pose thread: {e}")
+            
+        finally:
+            # Always mark the task as done
+            pose_queue.task_done()
+    
+    print("Pose estimation thread stopped")
+
+# Start the pose estimation thread
+pose_thread_running = True
+pose_thread = threading.Thread(target=pose_estimation_thread_func)
+pose_thread.daemon = True
+pose_thread.start()
+
+# Main loop
+try:
+    print("Starting main loop - press Q to quit, R to reset ball, SPACE to activate")
+    
+    while True:
+        # Timing for FPS calculation
+        current_time = time.time()
+        delta_time = current_time - previous_time
+        previous_time = current_time
+        
+        # FPS counter update
+        fps_frame_count += 1
+        if current_time - fps_last_update > fps_update_interval:
+            current_fps = fps_frame_count / (current_time - fps_last_update)
+            fps_last_update = current_time
+            fps_frame_count = 0
+            print(f"Current FPS: {current_fps:.1f}")
+            if DEBUG_MODE:
+                physics_rate = physics_counter
+                physics_counter = 0
+                print(f"Physics updates per second: {physics_rate}")
+        
+        # Cap delta time to prevent large jumps
+        if delta_time > 0.1:
+            delta_time = 0.1
+        
+        # Accumulate time for fixed physics updates
+        accumulated_time += delta_time
+        
+        # Get camera frame
+        ret, oriImg = cap.read()
+        if not ret:
+            print("Failed to grab frame")
+            time.sleep(0.01)
+            continue
+            
+        # Flip the image horizontally for more intuitive interaction
+        oriImg = cv2.flip(oriImg, 1)
+        
+        # Create canvas copy efficiently
+        canvas = copy.copy(oriImg)
+        
+        # Check for new pose results (non-blocking)
+        if new_pose_result:
+            try:
+                pose_result = pose_result_queue.get_nowait()
+                last_valid_keypoints = pose_result
+                new_pose_result = False
+            except queue.Empty:
+                pass
+        
+        # Process pose detection on a schedule
+        frame_count += 1
+        
+        # Only submit a new frame for pose analysis if the queue is empty
+        # and it's time to do another detection
+        if frame_count % POSE_SKIP_FRAMES == 0 and pose_queue.empty():
+            try:
+                img_for_thread = oriImg.copy()  # Make a copy for the thread
+                pose_queue.put_nowait(img_for_thread)  # Non-blocking put
+            except queue.Full:
+                pass  # Queue is full, skip this frame
+        
+        # Run fixed timestep physics updates
+        physics_update_count = 0
+        while accumulated_time >= fixed_time_step:
+            physics_update_count += 1
+            physics_counter += 1
+            
+            # Limit physics updates per frame to prevent spiral of death
+            if physics_update_count > 5:
+                accumulated_time = 0
+                break
+            
+            # Use last valid keypoints if available
+            if last_valid_keypoints is not None:
+                # Check for arm collision with ball
+                check_arm_collision(last_valid_keypoints[0], last_valid_keypoints[1])
+            
+            # Update physics with fixed time step
+            update_physics(fixed_time_step)
+            accumulated_time -= fixed_time_step
+        
+        # Draw body pose if we have valid keypoints and display is enabled
+        if DISPLAY_KEYPOINTS and last_valid_keypoints is not None:
+            try:
+                canvas = util_fast.draw_bodypose(canvas, last_valid_keypoints[0], last_valid_keypoints[1])
+                
+                # For debugging - highlight arm segments used for collision detection
+                if DEBUG_MODE:
+                    candidate, subset = last_valid_keypoints
+                    # Draw right arm (elbow to wrist) for each person
+                    for person_idx in range(len(subset)):
+                        right_elbow_idx = int(subset[person_idx][3])
+                        right_wrist_idx = int(subset[person_idx][4])
+                        
+                        if (right_elbow_idx != -1 and right_wrist_idx != -1 and 
+                            right_elbow_idx < len(candidate) and right_wrist_idx < len(candidate)):
+                            elbow_x, elbow_y = int(candidate[right_elbow_idx][0]), int(candidate[right_elbow_idx][1])
+                            wrist_x, wrist_y = int(candidate[right_wrist_idx][0]), int(candidate[right_wrist_idx][1])
+                            cv2.line(canvas, (elbow_x, elbow_y), (wrist_x, wrist_y), (0, 255, 255), 2)
+                            
+                        # Draw left arm (elbow to wrist)
+                        left_elbow_idx = int(subset[person_idx][6])
+                        left_wrist_idx = int(subset[person_idx][7])
+                        
+                        if (left_elbow_idx != -1 and left_wrist_idx != -1 and 
+                            left_elbow_idx < len(candidate) and left_wrist_idx < len(candidate)):
+                            elbow_x, elbow_y = int(candidate[left_elbow_idx][0]), int(candidate[left_elbow_idx][1])
+                            wrist_x, wrist_y = int(candidate[left_wrist_idx][0]), int(candidate[left_wrist_idx][1])
+                            cv2.line(canvas, (elbow_x, elbow_y), (wrist_x, wrist_y), (0, 255, 255), 2)
+            except Exception as e:
+                print(f"Error drawing body pose: {e}")
+        
+        # Draw floor line at bottom of screen
+        cv2.line(canvas, (0, floor_y), (CANVAS_WIDTH, floor_y), (0, 255, 255), 1)
+        
+        # Draw ball with a dynamic color based on velocity
+        velocity_magnitude = np.linalg.norm(ball_velocity)
+        color_intensity = min(255, int(velocity_magnitude * 15))
+        
+        # Different color for active vs inactive ball
+        if ball_active:
+            if ball_on_ground and velocity_magnitude < 0.2:
+                ball_color = (0, 100, 200)  # Light blue when resting
+            else:
+                ball_color = (0, color_intensity, 255 - color_intensity)  # Dynamic color
+        else:
+            ball_color = (0, 0, 255)  # Red for inactive ball
+            
+        # Draw ball position
+        ball_center = (int(ball_pos[0]), int(ball_pos[1]))
+        cv2.circle(canvas, ball_center, BALL_RADIUS, ball_color, -1)
+        
+        # Draw collision radius for debugging
+        if DEBUG_MODE:
+            # Draw the collision detection radius around the ball
+            cv2.circle(canvas, ball_center, BALL_RADIUS + ARM_COLLISION_PADDING, (255, 255, 0), 1)
+        
+        # Display velocity vector line from ball center
+        if ball_active and velocity_magnitude > 0.5:
+            velocity_line_end = (
+                int(ball_pos[0] + ball_velocity[0] * 2),
+                int(ball_pos[1] + ball_velocity[1] * 2)
+            )
+            cv2.line(canvas, ball_center, velocity_line_end, (255, 0, 0), 2)
+        
+        # Display FPS and instructions on screen
+        cv2.putText(canvas, f'FPS: {current_fps:.1f}', (10, 30), 
+                   cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
+        
+        # Display ball state
+        state_text = "Ball: Active" if ball_active else "Ball: Waiting for hit"
+        if ball_active and ball_on_ground and velocity_magnitude < 0.2:
+            state_text = "Ball: Resting"
+        cv2.putText(canvas, state_text, (10, 60), 
+                   cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
+        
+        # Display velocity
+        if ball_active:
+            cv2.putText(canvas, f'Vel: {velocity_magnitude:.1f}', (10, 90), 
+                       cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
+            
+            # Display position for debugging
+            if DEBUG_MODE:
+                cv2.putText(canvas, f'Pos: {ball_pos[0]:.0f},{ball_pos[1]:.0f}', (10, 120), 
+                           cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
+                cv2.putText(canvas, f'On ground: {ball_on_ground}', (10, 150), 
+                           cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
+                cv2.putText(canvas, f'Physics: {physics_rate}/s', (10, 180), 
+                           cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
+        
+        # Show controls at bottom of screen
+        cv2.putText(canvas, "r: reset | space: activate | q: quit | d: debug | k: toggle keypoints", 
+                   (10, CANVAS_HEIGHT - 20), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 1)
+
+        # Display the processed video
+        cv2.imshow('Ball Physics Demo', canvas)
+        
+        # Check for key presses - use waitKey(1) for maximum responsiveness
+        key = cv2.waitKey(1) & 0xFF
+        if key == ord('q'):
+            break
+        elif key == ord('r'):
+            # Reset ball position and state
+            reset_ball()
+            print("Ball reset")
+        elif key == ord(' '):
+            # Activate the ball with a small initial velocity
+            if not ball_active:
+                ball_active = True
+                ball_velocity = np.array([1, -8], dtype=np.float32)  # Stronger initial jump
+                print("Ball activated by keyboard")
+        elif key == ord('d'):
+            # Toggle debug mode
+            DEBUG_MODE = not DEBUG_MODE
+            print(f"Debug mode: {DEBUG_MODE}")
+        elif key == ord('k'):
+            # Toggle keypoint display for even better performance
+            DISPLAY_KEYPOINTS = not DISPLAY_KEYPOINTS
+            print(f"Keypoint display: {DISPLAY_KEYPOINTS}")
+        elif key == ord('p'):
+            # Decrease pose skip frames (detect more often)
+            if POSE_SKIP_FRAMES > 1:
+                POSE_SKIP_FRAMES -= 1
+            print(f"Pose skip frames: {POSE_SKIP_FRAMES}")
+        elif key == ord('o'):
+            # Increase pose skip frames (detect less often)
+            POSE_SKIP_FRAMES += 1
+            print(f"Pose skip frames: {POSE_SKIP_FRAMES}")
+except KeyboardInterrupt:
+    print("Program interrupted by user")
+except Exception as e:
+    print(f"Error in main loop: {e}")
+finally:
+    # Clean up resources
+    pose_thread_running = False
+    if pose_thread and pose_thread.is_alive():
+        pose_thread.join(timeout=1.0)
+        
+    # Empty the queue to avoid hanging
+    while not pose_queue.empty():
+        try:
+            pose_queue.get_nowait()
+            pose_queue.task_done()
+        except:
+            pass
+            
+    # Release camera and close windows
+    cap.release()
+    cv2.destroyAllWindows()
+    print("Program terminated successfully")
