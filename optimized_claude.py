@@ -24,10 +24,18 @@ ELASTICITY = 0.7  # Reduced elasticity for more realistic bounces
 FRICTION = 0.98  # Friction coefficient
 ARM_COLLISION_PADDING = 10  # Distance beyond ball radius for arm collision detection
 
+# Palm detection constants
+PALM_BASE_SIZE = 40  # Base palm size for collision detection
+MIN_PALM_SIZE = 30  # Minimum palm size regardless of distance
+MAX_PALM_SIZE = 60  # Maximum palm size regardless of distance
+PALM_DISTANCE_FACTOR = 1.5  # How much the palm size changes with hand position
+WRIST_ELBOW_REF_DISTANCE = 100  # Reference distance between wrist and elbow at medium range
+
 # Debug flags
 DEBUG_MODE = False  # Set to True for detailed debugging info
 REDUCED_MODEL_PRECISION = True  # Use FP16 precision if available with torch.amp
 DISPLAY_KEYPOINTS = True  # Set to False for even better performance
+ENABLE_PALM_DETECTION = True  # Enable palm collision detection
 
 print(f"Starting ball physics demo with optimized settings...")
 
@@ -113,6 +121,11 @@ floor_y = CANVAS_HEIGHT - 1  # Floor at bottom of screen
 ball_active = False
 ball_on_ground = False
 ground_contact_time = 0
+
+# Palm detection state
+palm_positions = []  # Array of palm positions with their sizes
+palm_history = []  # Track palm positions over time
+PALM_HISTORY_LENGTH = 5  # Number of frames to keep palm history
 
 # Time tracking for physics
 previous_time = time.time()
@@ -309,6 +322,214 @@ def update_physics(delta_time):
     collision = check_wall_collision()
     
     return collision
+
+def calculate_palm_size(wrist_pos, elbow_pos):
+    """
+    Calculate the palm size based on the distance between wrist and elbow.
+    This estimates the distance from camera - a larger distance means the hand appears smaller.
+    
+    Returns the palm radius for collision detection
+    """
+    # Calculate distance between wrist and elbow
+    wrist_elbow_distance = np.linalg.norm(np.array(wrist_pos) - np.array(elbow_pos))
+    
+    # Scale palm size based on distance - closer hands (larger on screen) get larger palm detection
+    if wrist_elbow_distance > 0:
+        # Calculate palm size as a proportion of the reference distance
+        palm_size = PALM_BASE_SIZE * (wrist_elbow_distance / WRIST_ELBOW_REF_DISTANCE) * PALM_DISTANCE_FACTOR
+        
+        # Clamp palm size between min and max values
+        palm_size = max(MIN_PALM_SIZE, min(MAX_PALM_SIZE, palm_size))
+        
+        return palm_size
+    else:
+        # Default size if distance calculation fails
+        return PALM_BASE_SIZE
+
+def estimate_palm_position(wrist_pos, elbow_pos):
+    """
+    Estimate palm position based on wrist and elbow positions.
+    The palm is positioned a short distance from the wrist, away from the elbow.
+    """
+    # Convert to numpy arrays for vector operations
+    wrist = np.array(wrist_pos)
+    elbow = np.array(elbow_pos)
+    
+    # Vector from elbow to wrist
+    direction = wrist - elbow
+    
+    # Normalize direction vector
+    length = np.linalg.norm(direction)
+    if length > 0:
+        direction = direction / length
+    else:
+        # Default direction if wrist and elbow are at the same position
+        direction = np.array([0, -1])  # Assume hand is pointing up
+    
+    # Position palm slightly past the wrist (about 15% of the forearm length)
+    palm_offset_distance = length * 0.15
+    palm_pos = wrist + direction * palm_offset_distance
+    
+    return palm_pos
+
+def detect_palms(candidate, subset):
+    """
+    Detect palm positions based on pose estimation results.
+    For each detected person, estimate palm positions and calculate their sizes
+    based on the distance from the camera.
+    
+    Returns a list of palm positions and their sizes.
+    """
+    global palm_positions, palm_history
+    
+    # Clear previous palm positions
+    palm_positions = []
+    
+    # Need valid candidates and subsets
+    if candidate is None or subset is None or len(candidate) == 0 or subset.shape[0] == 0:
+        return
+    
+    # Process all detected people
+    for person_idx in range(len(subset)):
+        # Check right arm (elbow to wrist)
+        right_elbow_idx = int(subset[person_idx][3])  # Index for right elbow
+        right_wrist_idx = int(subset[person_idx][4])  # Index for right wrist
+        
+        if (right_elbow_idx != -1 and right_wrist_idx != -1 and 
+            right_elbow_idx < len(candidate) and right_wrist_idx < len(candidate)):
+            # Check confidence
+            if (candidate[right_elbow_idx][2] > KEYPOINT_CONFIDENCE_THRESHOLD and 
+                candidate[right_wrist_idx][2] > KEYPOINT_CONFIDENCE_THRESHOLD):
+                # Get coordinates
+                elbow_pos = (candidate[right_elbow_idx][0], candidate[right_elbow_idx][1])
+                wrist_pos = (candidate[right_wrist_idx][0], candidate[right_wrist_idx][1])
+                
+                # Estimate palm position
+                palm_pos = estimate_palm_position(wrist_pos, elbow_pos)
+                
+                # Calculate palm size based on apparent distance from camera
+                palm_size = calculate_palm_size(wrist_pos, elbow_pos)
+                
+                # Add to palm positions
+                palm_positions.append({
+                    "position": palm_pos,
+                    "size": palm_size,
+                    "side": "right"
+                })
+        
+        # Check left arm (elbow to wrist)
+        left_elbow_idx = int(subset[person_idx][6])  # Index for left elbow
+        left_wrist_idx = int(subset[person_idx][7])  # Index for left wrist
+        
+        if (left_elbow_idx != -1 and left_wrist_idx != -1 and 
+            left_elbow_idx < len(candidate) and left_wrist_idx < len(candidate)):
+            # Check confidence
+            if (candidate[left_elbow_idx][2] > KEYPOINT_CONFIDENCE_THRESHOLD and 
+                candidate[left_wrist_idx][2] > KEYPOINT_CONFIDENCE_THRESHOLD):
+                # Get coordinates
+                elbow_pos = (candidate[left_elbow_idx][0], candidate[left_elbow_idx][1])
+                wrist_pos = (candidate[left_wrist_idx][0], candidate[left_wrist_idx][1])
+                
+                # Estimate palm position
+                palm_pos = estimate_palm_position(wrist_pos, elbow_pos)
+                
+                # Calculate palm size based on apparent distance from camera
+                palm_size = calculate_palm_size(wrist_pos, elbow_pos)
+                
+                # Add to palm positions
+                palm_positions.append({
+                    "position": palm_pos,
+                    "size": palm_size,
+                    "side": "left"
+                })
+    
+    # Add current palm positions to history
+    if palm_positions:
+        palm_history.append(palm_positions)
+        # Maintain history length
+        if len(palm_history) > PALM_HISTORY_LENGTH:
+            palm_history.pop(0)
+
+def check_palm_collision():
+    """
+    Check for collisions between the ball and palm positions.
+    Palm collisions should provide a more intuitive interaction than arm-based collisions.
+    """
+    global ball_pos, ball_velocity, ball_active, ball_on_ground
+    
+    if not ENABLE_PALM_DETECTION or not palm_history:
+        return False
+    
+    collision_happened = False
+    
+    # Check all recent palm positions
+    for positions in palm_history:
+        for palm in positions:
+            # Get palm position and size
+            palm_pos = np.array(palm["position"])
+            palm_size = palm["size"]
+            
+            # Calculate distance from ball to palm
+            distance = np.linalg.norm(ball_pos - palm_pos)
+            
+            # Check if close enough for collision
+            collision_threshold = BALL_RADIUS + palm_size
+            
+            if DEBUG_MODE:
+                print(f"Distance to {palm['side']} palm: {distance:.1f}, threshold: {collision_threshold}")
+            
+            if distance < collision_threshold:
+                # Activate the ball if it's not already active
+                if not ball_active:
+                    print(f"Ball activated by {palm['side']} palm hit!")
+                    ball_active = True
+                
+                # Vector from palm to ball
+                palm_to_ball_vector = ball_pos - palm_pos
+                palm_to_ball_length = np.linalg.norm(palm_to_ball_vector)
+                
+                if palm_to_ball_length > 0:
+                    palm_to_ball_vector = palm_to_ball_vector / palm_to_ball_length
+                else:
+                    # Default direction if they're at the exact same point
+                    palm_to_ball_vector = np.array([0, -1])
+                
+                # Calculate reflection - simulating a bounce off the palm
+                # First, calculate the normal vector to the palm surface
+                # (assuming palm normal is the direction from palm to ball)
+                normal_vector = palm_to_ball_vector
+                
+                # Calculate reflection vector
+                dot_product = np.dot(ball_velocity, normal_vector)
+                reflection = ball_velocity - 2 * dot_product * normal_vector
+                
+                # Apply reflection with elasticity
+                ball_velocity = reflection * ELASTICITY
+                
+                # Add a hit force in the direction away from the palm
+                palm_force = 10.0  # Stronger force for palm hits
+                
+                # Apply force in direction away from palm
+                ball_velocity += palm_to_ball_vector * palm_force
+                
+                # Move ball slightly away from palm to prevent multiple collisions
+                ball_pos += palm_to_ball_vector * 5
+                
+                # Ball is no longer on ground after being hit
+                ball_on_ground = False
+                
+                # Log collision for debugging
+                if DEBUG_MODE:
+                    print(f"Collision with {palm['side']} palm at position {ball_pos[0]:.1f}, {ball_pos[1]:.1f}")
+                    print(f"New velocity: {ball_velocity[0]:.1f}, {ball_velocity[1]:.1f}")
+                
+                collision_happened = True
+                break  # Only process one collision per frame
+        
+        if collision_happened:
+            break
+    
+    return collision_happened
 
 def scale_keypoints(candidate, subset, scale_factor=1.0):
     """Scale keypoints coordinates if detection was done at a different resolution"""
@@ -556,6 +777,9 @@ try:
             try:
                 pose_result = pose_result_queue.get_nowait()
                 last_valid_keypoints = pose_result
+                # Update palm positions based on the new pose
+                if ENABLE_PALM_DETECTION:
+                    detect_palms(last_valid_keypoints[0], last_valid_keypoints[1])
                 new_pose_result = False
             except queue.Empty:
                 pass
@@ -583,9 +807,15 @@ try:
                 accumulated_time = 0
                 break
             
-            # Use last valid keypoints if available
-            if last_valid_keypoints is not None:
-                # Check for arm collision with ball
+            # Check for palm collisions first (preferred over arm collisions)
+            if ENABLE_PALM_DETECTION:
+                palm_collision = check_palm_collision()
+                
+                # If no palm collision, check for arm collision as fallback
+                if not palm_collision and last_valid_keypoints is not None:
+                    check_arm_collision(last_valid_keypoints[0], last_valid_keypoints[1])
+            # If palm detection disabled, just use arm collision
+            elif last_valid_keypoints is not None:
                 check_arm_collision(last_valid_keypoints[0], last_valid_keypoints[1])
             
             # Update physics with fixed time step
@@ -622,6 +852,39 @@ try:
                             cv2.line(canvas, (elbow_x, elbow_y), (wrist_x, wrist_y), (0, 255, 255), 2)
             except Exception as e:
                 print(f"Error drawing body pose: {e}")
+        
+        # Draw palm positions if palm detection is enabled
+        if ENABLE_PALM_DETECTION and palm_positions:
+            for palm in palm_positions:
+                palm_pos = palm["position"]
+                palm_size = palm["size"]
+                palm_side = palm["side"]
+                
+                # Draw palm circle with size based on distance
+                if palm_side == "right":
+                    palm_color = (0, 255, 0)  # Green for right palm
+                else:
+                    palm_color = (255, 0, 255)  # Magenta for left palm
+                
+                cv2.circle(canvas, 
+                          (int(palm_pos[0]), int(palm_pos[1])), 
+                          int(palm_size), 
+                          palm_color, 
+                          2)  # Draw as outline
+                
+                # Draw a small filled circle at palm center for visibility
+                cv2.circle(canvas, 
+                          (int(palm_pos[0]), int(palm_pos[1])), 
+                          5, 
+                          palm_color, 
+                          -1)  # Filled
+                
+                # Show palm size as text if in debug mode
+                if DEBUG_MODE:
+                    cv2.putText(canvas, 
+                               f"{int(palm_size)}", 
+                               (int(palm_pos[0] + palm_size), int(palm_pos[1])),
+                               cv2.FONT_HERSHEY_SIMPLEX, 0.5, palm_color, 1)
         
         # Draw floor line at bottom of screen
         cv2.line(canvas, (0, floor_y), (CANVAS_WIDTH, floor_y), (0, 255, 255), 1)
@@ -682,7 +945,7 @@ try:
                            cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
         
         # Show controls at bottom of screen
-        cv2.putText(canvas, "r: reset | space: activate | q: quit | d: debug | k: toggle keypoints", 
+        cv2.putText(canvas, "r: reset | space: activate | q: quit | d: debug | k: toggle keypoints | p: toggle palm", 
                    (10, CANVAS_HEIGHT - 20), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 1)
 
         # Display the processed video
@@ -711,14 +974,17 @@ try:
             DISPLAY_KEYPOINTS = not DISPLAY_KEYPOINTS
             print(f"Keypoint display: {DISPLAY_KEYPOINTS}")
         elif key == ord('p'):
-            # Decrease pose skip frames (detect more often)
-            if POSE_SKIP_FRAMES > 1:
-                POSE_SKIP_FRAMES -= 1
-            print(f"Pose skip frames: {POSE_SKIP_FRAMES}")
-        elif key == ord('o'):
-            # Increase pose skip frames (detect less often)
-            POSE_SKIP_FRAMES += 1
-            print(f"Pose skip frames: {POSE_SKIP_FRAMES}")
+            # Toggle palm detection
+            ENABLE_PALM_DETECTION = not ENABLE_PALM_DETECTION
+            print(f"Palm detection: {ENABLE_PALM_DETECTION}")
+        elif key == ord('+'):
+            # Increase palm size multiplier
+            PALM_DISTANCE_FACTOR += 0.1
+            print(f"Palm distance factor: {PALM_DISTANCE_FACTOR:.1f}")
+        elif key == ord('-'):
+            # Decrease palm size multiplier
+            PALM_DISTANCE_FACTOR = max(0.5, PALM_DISTANCE_FACTOR - 0.1)
+            print(f"Palm distance factor: {PALM_DISTANCE_FACTOR:.1f}")
 except KeyboardInterrupt:
     print("Program interrupted by user")
 except Exception as e:
