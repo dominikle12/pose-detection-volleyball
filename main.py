@@ -115,12 +115,39 @@ else:
     DETECTION_HEIGHT = CANVAS_HEIGHT
 
 # Ball state variables - initialize at center of screen
-ball_pos = np.array([CANVAS_WIDTH // 2, CANVAS_HEIGHT // 2], dtype=np.float32)
+ball_pos = np.array([CANVAS_WIDTH // 2, - CANVAS_HEIGHT + BALL_RADIUS*2], dtype=np.float32)
 ball_velocity = np.array([0, 0], dtype=np.float32)
 floor_y = CANVAS_HEIGHT - 1  # Floor at bottom of screen
 ball_active = False
 ball_on_ground = False
 ground_contact_time = 0
+ball_ground_start_time = 0  
+# Countdown state variables
+countdown_active = True
+countdown_start_time = time.time()
+countdown_duration = 3.0  # 3 seconds countdown
+COUNTDOWN_SPAWN_HEIGHT = 50  # Distance from top of screen to spawn ball
+
+# Score tracking variables
+current_score = 0
+high_score = 0
+last_hit_was_bounce = False  # Track if we should award a point
+
+# Auto-reset variables
+auto_reset_duration = 3.0  # Reset ball if on ground for 3 seconds
+ball_ground_start_time = 0
+
+# Volleyball shot detection variables
+VOLLEYBALL_SHOT_COOLDOWN = 1.0  # Prevent multiple detections of same shot
+last_volleyball_shot_time = 0
+shot_message = ""
+shot_message_time = 0
+SHOT_MESSAGE_DURATION = 2.0  # How long to show the shot message
+
+# Shot detection thresholds
+DIG_DISTANCE_THRESHOLD = 150  # Max distance between hands for dig shot
+SET_HEIGHT_THRESHOLD = 100  # Min height above head for set shot
+SPIKE_VELOCITY_THRESHOLD = 15  # Min velocity added for spike detection
 
 # Palm detection state
 palm_positions = []  # Array of palm positions with their sizes
@@ -202,8 +229,7 @@ def point_to_segment_distance(p, v, w):
 
 def reset_ball(center_x=None, center_y=None):
     """Reset the ball to the given position or screen center"""
-    global ball_pos, ball_velocity, ball_active, ball_on_ground
-    
+    global ball_pos, ball_velocity, ball_active, ball_on_ground, ball_ground_start_time, current_score  
     if center_x is None or center_y is None:
         center_x, center_y = CANVAS_WIDTH // 2, CANVAS_HEIGHT // 2
     
@@ -211,13 +237,56 @@ def reset_ball(center_x=None, center_y=None):
     ball_velocity = np.array([0, 0], dtype=np.float32)
     ball_active = False
     ball_on_ground = False
-    
+    ball_ground_start_time = 0 
+    current_score = 0
+
     if DEBUG_MODE:
         print(f"Ball reset to position: ({ball_pos[0]}, {ball_pos[1]})")
 
+def start_countdown_spawn(spawn_x=None):
+    """Start countdown and spawn ball at top of screen"""
+    global ball_pos, ball_velocity, ball_active, ball_on_ground, countdown_active, countdown_start_time, ball_ground_start_time, current_score 
+
+    if spawn_x is None:
+        spawn_x = CANVAS_WIDTH // 2
+    
+    # Position ball at top of screen
+    ball_pos = np.array([spawn_x, COUNTDOWN_SPAWN_HEIGHT], dtype=np.float32)
+    ball_velocity = np.array([0, 0], dtype=np.float32)
+    ball_active = False  # Ball not active during countdown
+    ball_on_ground = False
+    ball_ground_start_time = 0
+    current_score = 0
+    
+    # Start countdown
+    countdown_active = True
+    countdown_start_time = time.time()
+    
+    print("Countdown started - ball will activate in 3 seconds!")
+
+def update_countdown():
+    """Update countdown state and activate ball when countdown ends"""
+    global countdown_active, ball_active
+    
+    if not countdown_active:
+        return None
+    
+    elapsed_time = time.time() - countdown_start_time
+    remaining_time = countdown_duration - elapsed_time
+    
+    if remaining_time <= 0:
+        # Countdown finished - activate ball
+        countdown_active = False
+        ball_active = True
+        print("Ball activated!")
+        return None
+    else:
+        # Return countdown number to display
+        return int(remaining_time) + 1
+
 def check_wall_collision():
     """Check and handle collisions with screen boundaries"""
-    global ball_pos, ball_velocity, ball_on_ground, ground_contact_time
+    global ball_pos, ball_velocity, ball_on_ground, ground_contact_time, ball_ground_start_time,  current_score, last_hit_was_bounce
     collision_happened = False
     
     # Debug output
@@ -248,41 +317,44 @@ def check_wall_collision():
         if DEBUG_MODE:
             print("Ceiling collision")
     
-    # Check floor collision - use bottom of ball
+# Check floor collision - use bottom of ball
     bottom_edge = ball_pos[1] + BALL_RADIUS
-    
+
     if bottom_edge >= floor_y:
         # Position the ball exactly at the floor
         ball_pos[1] = floor_y - BALL_RADIUS
         
         # Handle bouncing vs. resting
-        if ball_velocity[1] > 0.1:  # Moving downward with some speed
+        if abs(ball_velocity[1]) > 0.5:  # Changed from 0.1 to 0.5 for better threshold
             # Bounce with elasticity and extra damping
             ball_velocity[1] = -abs(ball_velocity[1]) * ELASTICITY * 0.8
             ball_velocity[0] *= 0.9  # Horizontal damping on bounce
             collision_happened = True
-            ball_on_ground = True
-            ground_contact_time = time.time()
             if DEBUG_MODE:
                 print("Floor bounce collision")
         else:
-            # Ball is on the ground with low velocity
+            # Ball is resting on ground - set vertical velocity to 0
+            ball_velocity[1] = 0
             ball_on_ground = True
-            ground_contact_time = time.time()
             
-            # Apply floor friction
-            ball_velocity[0] *= 0.9  # Strong horizontal friction on ground
-            if abs(ball_velocity[0]) < 0.1:  # Almost stopped horizontally
-                ball_velocity[0] = 0  # Stop completely
+            if current_score > 0:
+                print(f"Ball hit ground! Score reset from {current_score} to 0")
+            current_score = 0
+            last_hit_was_bounce = False
+
+            # Track when ball first hit the ground
+            if not ball_on_ground or ball_ground_start_time == 0:
+                ball_ground_start_time = time.time()
                 
-            # Make sure vertical velocity isn't pushing down into floor
-            if ball_velocity[1] > 0:
-                ball_velocity[1] = 0
+            # Apply strong floor friction
+            ball_velocity[0] *= 0.85  # Stronger friction
+            if abs(ball_velocity[0]) < 0.1:
+                ball_velocity[0] = 0
     else:
         # Ball is not on the ground
-        if time.time() - ground_contact_time > 0.1:  # If ball has been off ground for a while
-            ball_on_ground = False
-    
+        ball_on_ground = False
+        ball_ground_start_time = 0  # Reset the timer when ball leaves ground
+
     # Cap velocity if collision occurred
     if collision_happened:
         max_velocity = 15.0  # Max velocity limit
@@ -455,7 +527,7 @@ def check_palm_collision():
     Check for collisions between the ball and palm positions.
     Palm collisions should provide a more intuitive interaction than arm-based collisions.
     """
-    global ball_pos, ball_velocity, ball_active, ball_on_ground
+    global ball_pos, ball_velocity, ball_active, ball_on_ground, current_score, high_score, last_hit_was_bounce, shot_message, shot_message_time
     
     if not ENABLE_PALM_DETECTION or not palm_history:
         return False
@@ -503,6 +575,8 @@ def check_palm_collision():
                 dot_product = np.dot(ball_velocity, normal_vector)
                 reflection = ball_velocity - 2 * dot_product * normal_vector
                 
+                velocity_before = ball_velocity.copy()
+
                 # Apply reflection with elasticity
                 ball_velocity = reflection * ELASTICITY
                 
@@ -515,9 +589,26 @@ def check_palm_collision():
                 # Move ball slightly away from palm to prevent multiple collisions
                 ball_pos += palm_to_ball_vector * 5
                 
-                # Ball is no longer on ground after being hit
                 ball_on_ground = False
-                
+
+                # Ball is no longer on ground after being hit
+                shot_name, bonus_points = detect_volleyball_shot(palm_positions, ball_pos, velocity_before, ball_velocity)
+
+                if last_hit_was_bounce and ball_active:
+                    points_to_add = 1 + bonus_points  # Regular point plus bonus
+                    current_score += points_to_add
+                    if current_score > high_score:
+                        high_score = current_score
+                    
+                    if shot_name:
+                        shot_message = f"{shot_name} +{bonus_points} bonus!"
+                        shot_message_time = time.time()
+                        print(f"{shot_name} Score: {current_score} (High: {high_score})")
+                    else:
+                        print(f"Score: {current_score} (High: {high_score})")
+                        
+                last_hit_was_bounce = True
+
                 # Log collision for debugging
                 if DEBUG_MODE:
                     print(f"Collision with {palm['side']} palm at position {ball_pos[0]:.1f}, {ball_pos[1]:.1f}")
@@ -530,6 +621,76 @@ def check_palm_collision():
             break
     
     return collision_happened
+
+def detect_volleyball_shot(palm_positions, ball_pos, velocity_before, velocity_after):
+    """
+    Detect volleyball shots based on hand positions and ball physics
+    Returns: (shot_name, bonus_points) or (None, 0)
+    """
+    global last_volleyball_shot_time
+    
+    # Cooldown to prevent multiple detections
+    if time.time() - last_volleyball_shot_time < VOLLEYBALL_SHOT_COOLDOWN:
+        return None, 0
+    
+    if len(palm_positions) < 2:
+        return None, 0
+    
+    # Get left and right palm positions
+    left_palm = None
+    right_palm = None
+    
+    for palm in palm_positions:
+        if palm["side"] == "left":
+            left_palm = palm
+        elif palm["side"] == "right":
+            right_palm = palm
+    
+    if left_palm and right_palm:
+        left_pos = np.array(left_palm["position"])
+        right_pos = np.array(right_palm["position"])
+        
+        # Calculate distance between palms
+        palm_distance = np.linalg.norm(left_pos - right_pos)
+        
+        # Average palm position
+        avg_palm_pos = (left_pos + right_pos) / 2
+        
+        # DIG SHOT: Both hands close together and hit from below
+        if palm_distance < DIG_DISTANCE_THRESHOLD:
+            # Check if hit was from below (palms below ball at contact)
+            if avg_palm_pos[1] > ball_pos[1]:
+                last_volleyball_shot_time = time.time()
+                return "DIG SHOT!", 3
+        
+        # BUMP/PASS: Hands together, hit at medium height
+        if palm_distance < DIG_DISTANCE_THRESHOLD * 1.2:
+            # Check if hit was at chest/shoulder level
+            if abs(avg_palm_pos[1] - ball_pos[1]) < 50:
+                last_volleyball_shot_time = time.time()
+                return "BUMP PASS!", 2
+        
+        # SET SHOT: Both hands above head, gentle upward push
+        if avg_palm_pos[1] < ball_pos[1] - SET_HEIGHT_THRESHOLD:
+            # Check for gentle upward velocity
+            if velocity_after[1] < -5 and velocity_after[1] > -15:
+                last_volleyball_shot_time = time.time()
+                return "SET SHOT!", 3
+    
+    # SPIKE: Single hand hit with high velocity
+    if len(palm_positions) > 0:
+        # Check velocity increase
+        velocity_increase = np.linalg.norm(velocity_after) - np.linalg.norm(velocity_before)
+        
+        if velocity_increase > SPIKE_VELOCITY_THRESHOLD:
+            # Check if hit was from above
+            for palm in palm_positions:
+                palm_pos = np.array(palm["position"])
+                if palm_pos[1] < ball_pos[1]:
+                    last_volleyball_shot_time = time.time()
+                    return "SPIKE!", 5
+    
+    return None, 0
 
 def scale_keypoints(candidate, subset, scale_factor=1.0):
     """Scale keypoints coordinates if detection was done at a different resolution"""
@@ -548,7 +709,7 @@ def scale_keypoints(candidate, subset, scale_factor=1.0):
 
 def check_arm_collision(candidate, subset):
     """Check for collisions between the ball and arm segments"""
-    global ball_pos, ball_velocity, ball_active, ball_on_ground, last_arm_positions
+    global ball_pos, ball_velocity, ball_active, ball_on_ground, last_arm_positions, current_score, high_score, last_hit_was_bounce
     
     # Need valid candidates and subsets
     if candidate is None or subset is None or len(candidate) == 0 or subset.shape[0] == 0:
@@ -661,6 +822,13 @@ def check_arm_collision(candidate, subset):
                     # Ball is no longer on ground after being hit
                     ball_on_ground = False
                     
+                    if last_hit_was_bounce and ball_active:
+                        current_score += 1
+                        if current_score > high_score:
+                            high_score = current_score
+                        print(f"Score: {current_score} (High: {high_score})")
+                    last_hit_was_bounce = True
+
                     collision_happened = True
                     break  # Only process one collision per frame
         
@@ -822,6 +990,15 @@ try:
             update_physics(fixed_time_step)
             accumulated_time -= fixed_time_step
         
+        # Update countdown if active
+        countdown_number = update_countdown()
+        
+        # Check for auto-reset if ball has been on ground too long
+        if ball_on_ground and ball_active and ball_ground_start_time > 0:
+            if time.time() - ball_ground_start_time > auto_reset_duration:
+                print("Ball auto-reset after being on ground for 3 seconds")
+                start_countdown_spawn()
+
         # Draw body pose if we have valid keypoints and display is enabled
         if DISPLAY_KEYPOINTS and last_valid_keypoints is not None:
             try:
@@ -924,9 +1101,22 @@ try:
                    cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
         
         # Display ball state
-        state_text = "Ball: Active" if ball_active else "Ball: Waiting for hit"
-        if ball_active and ball_on_ground and velocity_magnitude < 0.2:
-            state_text = "Ball: Resting"
+        if countdown_active:
+            state_text = f"Ball: Countdown in progress..."
+        elif ball_active:
+            state_text = "Ball: Active"
+            if ball_on_ground and velocity_magnitude < 0.2:
+                if ball_ground_start_time > 0:
+                    time_remaining = auto_reset_duration - (time.time() - ball_ground_start_time)
+                    if time_remaining > 0:
+                        state_text = f"Ball: Resting (reset in {time_remaining:.1f}s)"
+                    else:
+                        state_text = "Ball: Resting"
+                else:
+                    state_text = "Ball: Resting"
+        else:
+            state_text = "Ball: Waiting for spawn"
+            
         cv2.putText(canvas, state_text, (10, 60), 
                    cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
         
@@ -934,6 +1124,7 @@ try:
         if ball_active:
             cv2.putText(canvas, f'Vel: {velocity_magnitude:.1f}', (10, 90), 
                        cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
+            
             
             # Display position for debugging
             if DEBUG_MODE:
@@ -944,8 +1135,61 @@ try:
                 cv2.putText(canvas, f'Physics: {physics_rate}/s', (10, 180), 
                            cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
         
+
+        # Display score and high score
+        cv2.putText(canvas, f'Score: {current_score}', (CANVAS_WIDTH - 150, 30), 
+                cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 255), 2)
+        cv2.putText(canvas, f'High: {high_score}', (CANVAS_WIDTH - 150, 60), 
+                cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 255), 2)
+                # Display countdown if active
+
+        # Display volleyball shot message
+        if shot_message and time.time() - shot_message_time < SHOT_MESSAGE_DURATION:
+            # Calculate fade effect
+            time_elapsed = time.time() - shot_message_time
+            alpha = 1.0 - (time_elapsed / SHOT_MESSAGE_DURATION)
+            
+            # Display shot message in center of screen
+            text_size = cv2.getTextSize(shot_message, cv2.FONT_HERSHEY_SIMPLEX, 1.5, 3)[0]
+            text_x = (CANVAS_WIDTH - text_size[0]) // 2
+            text_y = CANVAS_HEIGHT // 3
+            
+            # Draw background box
+            padding = 20
+            cv2.rectangle(canvas, 
+                        (text_x - padding, text_y - text_size[1] - padding),
+                        (text_x + text_size[0] + padding, text_y + padding),
+                        (0, 0, 0), -1)
+            cv2.rectangle(canvas, 
+                        (text_x - padding, text_y - text_size[1] - padding),
+                        (text_x + text_size[0] + padding, text_y + padding),
+                        (0, 255, 255), 3)
+            
+            # Draw text
+            cv2.putText(canvas, shot_message, (text_x, text_y), 
+                        cv2.FONT_HERSHEY_SIMPLEX, 1.5, (0, 255, 255), 3)
+        else:
+            shot_message = ""
+
+        if countdown_active:
+            countdown_num = update_countdown()
+            if countdown_num is not None:
+                # Draw large countdown number
+                countdown_text = str(countdown_num)
+                text_size = cv2.getTextSize(countdown_text, cv2.FONT_HERSHEY_SIMPLEX, 3, 5)[0]
+                text_x = (CANVAS_WIDTH - text_size[0]) // 2
+                text_y = (CANVAS_HEIGHT + text_size[1]) // 2
+                
+                # Draw background circle for countdown
+                cv2.circle(canvas, (text_x + text_size[0]//2, text_y - text_size[1]//2), 80, (0, 0, 0), -1)
+                cv2.circle(canvas, (text_x + text_size[0]//2, text_y - text_size[1]//2), 80, (0, 255, 255), 3)
+                
+                # Draw countdown number
+                cv2.putText(canvas, countdown_text, (text_x, text_y), 
+                           cv2.FONT_HERSHEY_SIMPLEX, 3, (0, 255, 255), 5)
+
         # Show controls at bottom of screen
-        cv2.putText(canvas, "r: reset | space: activate | q: quit | d: debug | k: toggle keypoints | p: toggle palm", 
+        cv2.putText(canvas, "r/space: countdown spawn | q: quit | d: debug | k: keypoints | p: palm", 
                    (10, CANVAS_HEIGHT - 20), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 1)
 
         # Display the processed video
@@ -956,15 +1200,18 @@ try:
         if key == ord('q'):
             break
         elif key == ord('r'):
-            # Reset ball position and state
-            reset_ball()
-            print("Ball reset")
+            # Start countdown spawn instead of immediate reset
+            start_countdown_spawn()
+            print("Ball countdown spawn started")
         elif key == ord(' '):
-            # Activate the ball with a small initial velocity
-            if not ball_active:
-                ball_active = True
-                ball_velocity = np.array([1, -8], dtype=np.float32)  # Stronger initial jump
-                print("Ball activated by keyboard")
+            # Start countdown spawn if ball is not active, otherwise give it a kick
+            if not ball_active and not countdown_active:
+                start_countdown_spawn()
+                print("Ball countdown spawn started")
+            elif ball_active:
+                # Give ball a small kick if already active
+                ball_velocity += np.array([1, -8], dtype=np.float32)
+                print("Ball kicked")
         elif key == ord('d'):
             # Toggle debug mode
             DEBUG_MODE = not DEBUG_MODE
