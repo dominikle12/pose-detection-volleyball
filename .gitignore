@@ -50,3 +50,7 @@ Thumbs.db
 *.pth
 *.pt
 *.h5
+
+
+.pytorch-openpose-deploy.tar.gz
+/pytorch-openpose-deploy
