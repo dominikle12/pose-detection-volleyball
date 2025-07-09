@@ -1,0 +1,32 @@
+# Git files
+.git
+.gitignore
+README.md
+
+# Python cache
+__pycache__
+*.pyc
+*.pyo
+*.pyd
+
+# Virtual environments
+venv/
+env/
+
+# IDE files
+.vscode
+.idea
+*.swp
+
+# Large model files
+*.pth
+*.pt
+*.h5
+
+# Debug files
+debug.log
+debug_output.txt
+
+# OS files
+.DS_Store
+Thumbs.db
