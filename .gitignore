@@ -52,5 +52,6 @@ Thumbs.db
 *.h5
 
 
-.pytorch-openpose-deploy.tar.gz
-/pytorch-openpose-deploy
+# Deployment package files
+pytorch-openpose-deploy.tar.gz
+pytorch-openpose-deploy/

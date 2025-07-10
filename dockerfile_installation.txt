@@ -1,0 +1,19 @@
+# 1. Extract
+tar -xzf pytorch-openpose-deploy.tar.gz
+cd pytorch-openpose-deploy
+
+# 2. Install
+chmod +x install.sh
+./install.sh
+# (if Docker was just installed, log out/in and run ./install.sh again)
+
+# 3. Add model file
+# Download or copy body_coco.pth to model/ directory
+
+# 4. Test
+chmod +x test_camera.sh
+./test_camera.sh
+
+# 5. Run
+chmod +x run.sh
+./run.sh
