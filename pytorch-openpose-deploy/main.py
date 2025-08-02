@@ -140,10 +140,20 @@ countdown_start_time = time.time()
 countdown_duration = 3.0  # 3 seconds countdown
 COUNTDOWN_SPAWN_HEIGHT = 50  # Distance from top of screen to spawn ball
 
-# Score tracking variables
+# Enhanced score tracking variables
 current_score = 0
 high_score = 0
 last_hit_was_bounce = False  # Track if we should award a point
+
+# New robust scoring system variables
+ball_trajectory_history = []  # Track ball position over time
+last_successful_hit_time = 0
+hit_sequence_active = False
+min_trajectory_points = 5  # Minimum points to validate trajectory
+upward_velocity_threshold = -3.0  # Ball must move up after hit
+successful_volley_timeout = 2.0  # Time window for successful volley
+consecutive_hits = 0  # Track consecutive successful hits
+last_ground_contact_time = 0
 
 # Auto-reset variables
 auto_reset_duration = 3.0  # Reset ball if on ground for 3 seconds
@@ -249,7 +259,9 @@ def point_to_segment_distance(p, v, w):
 
 def reset_ball(center_x=None, center_y=None):
     """Reset the ball to the given position or screen center"""
-    global ball_pos, ball_velocity, ball_active, ball_on_ground, ball_ground_start_time, current_score  
+    global ball_pos, ball_velocity, ball_active, ball_on_ground, ball_ground_start_time, current_score
+    global ball_trajectory_history, consecutive_hits, last_successful_hit_time, last_ground_contact_time
+    
     if center_x is None or center_y is None:
         center_x, center_y = CANVAS_WIDTH // 2, CANVAS_HEIGHT // 2
     
@@ -259,13 +271,20 @@ def reset_ball(center_x=None, center_y=None):
     ball_on_ground = False
     ball_ground_start_time = 0 
     current_score = 0
+    
+    # Reset enhanced scoring variables
+    ball_trajectory_history = []
+    consecutive_hits = 0
+    last_successful_hit_time = 0
+    last_ground_contact_time = 0
 
     if DEBUG_MODE:
         print(f"Ball reset to position: ({ball_pos[0]}, {ball_pos[1]})")
 
 def start_countdown_spawn(spawn_x=None):
     """Start countdown and spawn ball at top of screen"""
-    global ball_pos, ball_velocity, ball_active, ball_on_ground, countdown_active, countdown_start_time, ball_ground_start_time, current_score 
+    global ball_pos, ball_velocity, ball_active, ball_on_ground, countdown_active, countdown_start_time, ball_ground_start_time, current_score
+    global ball_trajectory_history, consecutive_hits, last_successful_hit_time, last_ground_contact_time
 
     if spawn_x is None:
         spawn_x = CANVAS_WIDTH // 2
@@ -277,6 +296,12 @@ def start_countdown_spawn(spawn_x=None):
     ball_on_ground = False
     ball_ground_start_time = 0
     current_score = 0
+    
+    # Reset enhanced scoring variables
+    ball_trajectory_history = []
+    consecutive_hits = 0
+    last_successful_hit_time = 0
+    last_ground_contact_time = 0
     
     # Start countdown
     countdown_active = True
@@ -357,9 +382,22 @@ def check_wall_collision():
             ball_velocity[1] = 0
             ball_on_ground = True
             
+            # Enhanced ground contact handling
+            global consecutive_hits, last_ground_contact_time, last_successful_hit_time
+            
+            last_ground_contact_time = time.time()
+            
+            # Only reset score if it's been a while since last successful hit
+            time_since_hit = last_ground_contact_time - last_successful_hit_time
+            
             if current_score > 0:
-                print(f"Ball hit ground! Score reset from {current_score} to 0")
-            current_score = 0
+                if time_since_hit > successful_volley_timeout:
+                    print(f"Ball hit ground! Score reset from {current_score} to 0 (timeout)")
+                    current_score = 0
+                    consecutive_hits = 0
+                else:
+                    print(f"Ball bounced but keeping score ({time_since_hit:.1f}s since hit)")
+            
             last_hit_was_bounce = False
 
             # Track when ball first hit the ground
@@ -389,12 +427,66 @@ def check_wall_collision():
     
     return collision_happened
 
+def update_ball_trajectory():
+    """Track ball trajectory for scoring validation"""
+    global ball_trajectory_history, ball_pos, ball_velocity
+    
+    # Add current ball state to trajectory history
+    current_time = time.time()
+    ball_trajectory_history.append({
+        'time': current_time,
+        'position': ball_pos.copy(),
+        'velocity': ball_velocity.copy(),
+        'on_ground': ball_on_ground
+    })
+    
+    # Keep only recent trajectory points (last 2 seconds)
+    cutoff_time = current_time - 2.0
+    ball_trajectory_history = [point for point in ball_trajectory_history if point['time'] > cutoff_time]
+
+def validate_successful_hit(hit_time):
+    """
+    Validate if a hit was successful by checking ball trajectory after the hit.
+    A successful hit should result in upward ball movement.
+    """
+    global ball_trajectory_history
+    
+    # Get trajectory points after the hit
+    post_hit_points = [point for point in ball_trajectory_history if point['time'] > hit_time]
+    
+    if len(post_hit_points) < min_trajectory_points:
+        return False, "Not enough trajectory data"
+    
+    # Check if ball moved upward after hit (negative velocity = upward)
+    initial_velocity = post_hit_points[0]['velocity'][1] if post_hit_points else 0
+    
+    if initial_velocity > upward_velocity_threshold:
+        return False, f"Ball didn't move up enough: {initial_velocity:.1f}"
+    
+    # Check if ball gained altitude within 0.5 seconds after hit
+    hit_position_y = post_hit_points[0]['position'][1]
+    max_altitude = hit_position_y
+    
+    for point in post_hit_points[:10]:  # Check first 10 points (~ 0.5 seconds)
+        if point['position'][1] < max_altitude:
+            max_altitude = point['position'][1]
+    
+    altitude_gain = hit_position_y - max_altitude
+    
+    if altitude_gain < 20:  # Minimum 20 pixels of upward movement
+        return False, f"Insufficient altitude gain: {altitude_gain:.1f}"
+    
+    return True, f"Valid hit: altitude gain {altitude_gain:.1f}, initial velocity {initial_velocity:.1f}"
+
 def update_physics(delta_time):
     """Update ball physics for one time step"""
     global ball_pos, ball_velocity, ball_active, ball_on_ground
     
     if not ball_active:
         return False
+    
+    # Update ball trajectory tracking
+    update_ball_trajectory()
     
     # Apply physics only if the ball is active
     if not ball_on_ground:
@@ -621,22 +713,69 @@ def check_palm_collision():
                 
                 ball_on_ground = False
 
-                # Ball is no longer on ground after being hit
+                # Enhanced scoring system with trajectory validation
+                current_time = time.time()
+                
+                # Detect volleyball shot type first
                 shot_name, bonus_points = detect_volleyball_shot(palm_positions, ball_pos, velocity_before, ball_velocity)
-
-                if last_hit_was_bounce and ball_active:
-                    points_to_add = 1 + bonus_points  # Regular point plus bonus
-                    current_score += points_to_add
-                    if current_score > high_score:
-                        high_score = current_score
+                
+                # Store hit information for later validation
+                hit_info = {
+                    'time': current_time,
+                    'shot_name': shot_name,
+                    'bonus_points': bonus_points,
+                    'position': ball_pos.copy(),
+                    'velocity': ball_velocity.copy()
+                }
+                
+                # Schedule validation check after trajectory develops
+                def validate_and_score():
+                    nonlocal hit_info
+                    global current_score, high_score, shot_message, shot_message_time, consecutive_hits, last_successful_hit_time
                     
-                    if shot_name:
-                        shot_message = f"{shot_name} +{bonus_points} bonus!"
-                        shot_message_time = time.time()
-                        print(f"{shot_name} Score: {current_score} (High: {high_score})")
-                    else:
-                        print(f"Score: {current_score} (High: {high_score})")
+                    # Wait for trajectory to develop
+                    time.sleep(0.3)
+                    
+                    # Validate if the hit was successful
+                    is_valid, validation_msg = validate_successful_hit(hit_info['time'])
+                    
+                    if DEBUG_MODE:
+                        print(f"Hit validation: {validation_msg}")
+                    
+                    if is_valid:
+                        # Award points for successful hit
+                        points_to_add = 1 + hit_info['bonus_points']
+                        current_score += points_to_add
+                        consecutive_hits += 1
+                        last_successful_hit_time = current_time
                         
+                        if current_score > high_score:
+                            high_score = current_score
+                        
+                        # Show shot message only for specific volleyball shots
+                        volleyball_shots = ["SPIKE!", "SET SHOT!", "DIG SHOT!", "BUMP PASS!"]
+                        
+                        if hit_info['shot_name'] and hit_info['shot_name'] in volleyball_shots:
+                            if hit_info['bonus_points'] > 0:
+                                shot_message = f"{hit_info['shot_name']} +{hit_info['bonus_points']} bonus!"
+                            else:
+                                shot_message = hit_info['shot_name']
+                            shot_message_time = time.time()
+                            print(f"{hit_info['shot_name']} Score: {current_score} (High: {high_score}) Consecutive: {consecutive_hits}")
+                        else:
+                            # No visual message for basic hits, just console output
+                            print(f"Good Hit! Score: {current_score} (High: {high_score}) Consecutive: {consecutive_hits}")
+                    else:
+                        # Hit was not successful - no points awarded
+                        if DEBUG_MODE:
+                            print(f"Hit not awarded: {validation_msg}")
+                
+                # Run validation in a separate thread to avoid blocking
+                import threading
+                validation_thread = threading.Thread(target=validate_and_score)
+                validation_thread.daemon = True
+                validation_thread.start()
+                
                 last_hit_was_bounce = True
 
                 # Log collision for debugging
@@ -654,71 +793,95 @@ def check_palm_collision():
 
 def detect_volleyball_shot(palm_positions, ball_pos, velocity_before, velocity_after):
     """
-    Detect volleyball shots based on hand positions and ball physics
+    Enhanced volleyball shot detection with better validation
     Returns: (shot_name, bonus_points) or (None, 0)
     """
     global last_volleyball_shot_time
     
-    # Cooldown to prevent multiple detections
-    if time.time() - last_volleyball_shot_time < VOLLEYBALL_SHOT_COOLDOWN:
+    # Reduced cooldown for better responsiveness
+    if time.time() - last_volleyball_shot_time < 0.3:
         return None, 0
     
-    if len(palm_positions) < 2:
+    # Check if we have enough velocity change to be a meaningful hit
+    velocity_magnitude_before = np.linalg.norm(velocity_before)
+    velocity_magnitude_after = np.linalg.norm(velocity_after)
+    velocity_change = abs(velocity_magnitude_after - velocity_magnitude_before)
+    
+    if velocity_change < 2.0:  # Minimum velocity change for a valid hit
         return None, 0
     
-    # Get left and right palm positions
-    left_palm = None
-    right_palm = None
+    # Must have upward velocity component after hit for volleyball shots
+    if velocity_after[1] > -1.0:  # Ball must move upward (negative Y)
+        return None, 0
     
-    for palm in palm_positions:
-        if palm["side"] == "left":
-            left_palm = palm
-        elif palm["side"] == "right":
-            right_palm = palm
+    # Single hand shots (easier to detect)
+    if len(palm_positions) == 1:
+        palm = palm_positions[0]
+        palm_pos = np.array(palm["position"])
+        
+        # SPIKE: High velocity, downward angle, hand above ball
+        if (velocity_magnitude_after > 8.0 and 
+            palm_pos[1] < ball_pos[1] - 30 and  # Hand well above ball
+            velocity_after[1] > -20):  # Strong upward component
+            last_volleyball_shot_time = time.time()
+            return "SPIKE!", 5
+        
+        # OVERHEAD HIT: Medium velocity, hand above ball
+        elif (velocity_magnitude_after > 5.0 and 
+              palm_pos[1] < ball_pos[1] - 20):
+            last_volleyball_shot_time = time.time()
+            return "OVERHEAD!", 3
+        
+        # UNDERHAND HIT: Hand below ball
+        elif palm_pos[1] > ball_pos[1] + 20:
+            last_volleyball_shot_time = time.time()
+            return "UNDERHAND!", 2
     
-    if left_palm and right_palm:
-        left_pos = np.array(left_palm["position"])
-        right_pos = np.array(right_palm["position"])
+    # Two-handed shots
+    elif len(palm_positions) >= 2:
+        left_palm = None
+        right_palm = None
         
-        # Calculate distance between palms
-        palm_distance = np.linalg.norm(left_pos - right_pos)
+        for palm in palm_positions:
+            if palm["side"] == "left":
+                left_palm = palm
+            elif palm["side"] == "right":
+                right_palm = palm
         
-        # Average palm position
-        avg_palm_pos = (left_pos + right_pos) / 2
-        
-        # DIG SHOT: Both hands close together and hit from below
-        if palm_distance < DIG_DISTANCE_THRESHOLD:
-            # Check if hit was from below (palms below ball at contact)
-            if avg_palm_pos[1] > ball_pos[1]:
+        if left_palm and right_palm:
+            left_pos = np.array(left_palm["position"])
+            right_pos = np.array(right_palm["position"])
+            
+            # Calculate distance between palms
+            palm_distance = np.linalg.norm(left_pos - right_pos)
+            avg_palm_pos = (left_pos + right_pos) / 2
+            
+            # SET SHOT: Both hands above ball, close together, gentle velocity
+            if (palm_distance < 100 and 
+                avg_palm_pos[1] < ball_pos[1] - 40 and  # Hands above ball
+                velocity_magnitude_after < 12.0 and     # Gentle hit
+                velocity_after[1] < -3.0):              # Good upward component
                 last_volleyball_shot_time = time.time()
-                return "DIG SHOT!", 3
-        
-        # BUMP/PASS: Hands together, hit at medium height
-        if palm_distance < DIG_DISTANCE_THRESHOLD * 1.2:
-            # Check if hit was at chest/shoulder level
-            if abs(avg_palm_pos[1] - ball_pos[1]) < 50:
+                return "SET SHOT!", 4
+            
+            # DIG SHOT: Hands close together, below ball, strong upward velocity
+            elif (palm_distance < 120 and 
+                  avg_palm_pos[1] > ball_pos[1] + 10 and  # Hands below ball
+                  velocity_after[1] < -5.0):               # Strong upward velocity
                 last_volleyball_shot_time = time.time()
-                return "BUMP PASS!", 2
-        
-        # SET SHOT: Both hands above head, gentle upward push
-        if avg_palm_pos[1] < ball_pos[1] - SET_HEIGHT_THRESHOLD:
-            # Check for gentle upward velocity
-            if velocity_after[1] < -5 and velocity_after[1] > -15:
+                return "DIG SHOT!", 4
+            
+            # BUMP PASS: Hands moderately close, at ball level
+            elif (palm_distance < 150 and 
+                  abs(avg_palm_pos[1] - ball_pos[1]) < 40 and
+                  velocity_after[1] < -3.0):
                 last_volleyball_shot_time = time.time()
-                return "SET SHOT!", 3
+                return "BUMP PASS!", 3
     
-    # SPIKE: Single hand hit with high velocity
-    if len(palm_positions) > 0:
-        # Check velocity increase
-        velocity_increase = np.linalg.norm(velocity_after) - np.linalg.norm(velocity_before)
-        
-        if velocity_increase > SPIKE_VELOCITY_THRESHOLD:
-            # Check if hit was from above
-            for palm in palm_positions:
-                palm_pos = np.array(palm["position"])
-                if palm_pos[1] < ball_pos[1]:
-                    last_volleyball_shot_time = time.time()
-                    return "SPIKE!", 5
+    # Default good hit (if no specific shot detected but hit was valid)
+    if velocity_change > 3.0 and velocity_after[1] < -2.0:
+        last_volleyball_shot_time = time.time()
+        return "GOOD HIT!", 1
     
     return None, 0
 
@@ -1155,34 +1318,105 @@ try:
             )
             cv2.line(canvas, ball_center, velocity_line_end, (255, 0, 0), 2)
         
-        # Display FPS and instructions on screen
-        cv2.putText(canvas, f'FPS: {current_fps:.1f}', (10, 30), 
-                   cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
+        # Modern UI styling helper functions
+        def draw_rounded_rect(img, pt1, pt2, color, thickness=-1, radius=15):
+            """Draw a rounded rectangle"""
+            x1, y1 = pt1
+            x2, y2 = pt2
+            
+            # Create mask for rounded corners
+            overlay = img.copy()
+            
+            # Draw main rectangle
+            cv2.rectangle(overlay, (x1 + radius, y1), (x2 - radius, y2), color, thickness)
+            cv2.rectangle(overlay, (x1, y1 + radius), (x2, y2 - radius), color, thickness)
+            
+            # Draw corner circles
+            cv2.circle(overlay, (x1 + radius, y1 + radius), radius, color, thickness)
+            cv2.circle(overlay, (x2 - radius, y1 + radius), radius, color, thickness)
+            cv2.circle(overlay, (x1 + radius, y2 - radius), radius, color, thickness)
+            cv2.circle(overlay, (x2 - radius, y2 - radius), radius, color, thickness)
+            
+            # Blend with original image for transparency effect
+            alpha = 0.8
+            cv2.addWeighted(overlay, alpha, img, 1 - alpha, 0, img)
         
-        # Display ball state
+        def draw_gradient_text(img, text, position, font, font_scale, color1, color2, thickness=2):
+            """Draw text with gradient effect"""
+            x, y = position
+            text_size = cv2.getTextSize(text, font, font_scale, thickness)[0]
+            
+            # Create gradient background
+            gradient = np.zeros((text_size[1] + 10, text_size[0] + 20, 3), dtype=np.uint8)
+            for i in range(gradient.shape[1]):
+                ratio = i / gradient.shape[1]
+                blended_color = [
+                    int(color1[j] * (1 - ratio) + color2[j] * ratio) for j in range(3)
+                ]
+                gradient[:, i] = blended_color
+            
+            # Resize gradient to fit
+            if gradient.shape[1] > 0 and gradient.shape[0] > 0:
+                # Draw background with gradient
+                roi_y1 = max(0, y - text_size[1] - 5)
+                roi_y2 = min(img.shape[0], y + 5)
+                roi_x1 = max(0, x - 10)
+                roi_x2 = min(img.shape[1], x + text_size[0] + 10)
+                
+                if roi_y2 > roi_y1 and roi_x2 > roi_x1:
+                    resized_gradient = cv2.resize(gradient, (roi_x2 - roi_x1, roi_y2 - roi_y1))
+                    img[roi_y1:roi_y2, roi_x1:roi_x2] = cv2.addWeighted(
+                        img[roi_y1:roi_y2, roi_x1:roi_x2], 0.3, resized_gradient, 0.7, 0)
+            
+            # Draw text with shadow effect
+            cv2.putText(img, text, (x + 2, y + 2), font, font_scale, (0, 0, 0), thickness + 1)
+            cv2.putText(img, text, (x, y), font, font_scale, color1, thickness)
+
+        # Enhanced FPS display with modern styling
+        fps_text = f'FPS: {current_fps:.1f}'
+        draw_rounded_rect(canvas, (5, 5), (140, 35), (30, 30, 30), -1, 8)
+        cv2.putText(canvas, fps_text, (12, 26), 
+                   cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 150), 2)
+        
+        # Enhanced ball state display with color coding
         if countdown_active:
-            state_text = f"Ball: Countdown in progress..."
+            state_text = "COUNTDOWN"
+            state_color = (0, 150, 255)  # Orange
         elif ball_active:
-            state_text = "Ball: Active"
             if ball_on_ground and velocity_magnitude < 0.2:
                 if ball_ground_start_time > 0:
                     time_remaining = auto_reset_duration - (time.time() - ball_ground_start_time)
                     if time_remaining > 0:
-                        state_text = f"Ball: Resting (reset in {time_remaining:.1f}s)"
+                        state_text = f"RESTING ({time_remaining:.1f}s)"
+                        state_color = (100, 100, 255)  # Light red
                     else:
-                        state_text = "Ball: Resting"
+                        state_text = "RESTING"
+                        state_color = (100, 100, 255)
                 else:
-                    state_text = "Ball: Resting"
+                    state_text = "RESTING"
+                    state_color = (100, 100, 255)
+            else:
+                state_text = "ACTIVE"
+                state_color = (0, 255, 100)  # Bright green
         else:
-            state_text = "Ball: Waiting for spawn"
+            state_text = "WAITING"
+            state_color = (150, 150, 150)  # Gray
             
-        cv2.putText(canvas, state_text, (10, 60), 
-                   cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
+        # Draw enhanced state box
+        state_size = cv2.getTextSize(state_text, cv2.FONT_HERSHEY_SIMPLEX, 0.6, 2)[0]
+        draw_rounded_rect(canvas, (5, 45), (state_size[0] + 20, 75), (30, 30, 30), -1, 8)
+        cv2.putText(canvas, state_text, (12, 66), 
+                   cv2.FONT_HERSHEY_SIMPLEX, 0.6, state_color, 2)
         
-        # Display velocity
+        # Enhanced velocity display
         if ball_active:
-            cv2.putText(canvas, f'Vel: {velocity_magnitude:.1f}', (10, 90), 
-                       cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
+            vel_text = f'VEL: {velocity_magnitude:.1f}'
+            vel_intensity = min(255, int(velocity_magnitude * 20))
+            vel_color = (0, 255 - vel_intensity, vel_intensity)  # Green to red based on speed
+            
+            draw_rounded_rect(canvas, (5, 85), (120, 115), (30, 30, 30), -1, 8)
+            cv2.putText(canvas, vel_text, (12, 106), 
+                       cv2.FONT_HERSHEY_SIMPLEX, 0.6, vel_color, 2)
             
             
             # Display position for debugging
@@ -1195,61 +1429,168 @@ try:
                            cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
         
 
-        # Display score and high score
-        cv2.putText(canvas, f'Score: {current_score}', (CANVAS_WIDTH - 150, 30), 
-                cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 255), 2)
-        cv2.putText(canvas, f'High: {high_score}', (CANVAS_WIDTH - 150, 60), 
-                cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 255), 2)
+        # Enhanced score display with modern styling
+        score_panel_width = 160
+        score_panel_height = 80
+        score_x = CANVAS_WIDTH - score_panel_width - 10
+        score_y = 10
+        
+        # Draw score panel background with gradient effect
+        draw_rounded_rect(canvas, (score_x, score_y), 
+                         (score_x + score_panel_width, score_y + score_panel_height), 
+                         (20, 20, 40), -1, 12)
+        
+        # Score text with glow effect
+        score_text = f'SCORE: {current_score}'
+        cv2.putText(canvas, score_text, (score_x + 3, score_y + 27), 
+                   cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 0), 3)  # Shadow
+        cv2.putText(canvas, score_text, (score_x, score_y + 25), 
+                   cv2.FONT_HERSHEY_SIMPLEX, 0.6, (100, 255, 255), 2)  # Main text
+        
+        # High score with different color
+        high_text = f'HIGH: {high_score}'
+        cv2.putText(canvas, high_text, (score_x + 3, score_y + 57), 
+                   cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 0), 3)  # Shadow
+        cv2.putText(canvas, high_text, (score_x, score_y + 55), 
+                   cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 200, 0), 2)  # Gold color
                 # Display countdown if active
 
-        # Display volleyball shot message
+        # Enhanced volleyball shot message with animations
         if shot_message and time.time() - shot_message_time < SHOT_MESSAGE_DURATION:
-            # Calculate fade effect
+            # Calculate fade and pulse effects
             time_elapsed = time.time() - shot_message_time
             alpha = 1.0 - (time_elapsed / SHOT_MESSAGE_DURATION)
+            pulse = 1.0 + 0.3 * np.sin(time_elapsed * 8)  # Pulsing effect
             
-            # Display shot message in center of screen
-            text_size = cv2.getTextSize(shot_message, cv2.FONT_HERSHEY_SIMPLEX, 1.5, 3)[0]
+            # Dynamic text size based on pulse
+            font_scale = 1.2 * pulse
+            text_size = cv2.getTextSize(shot_message, cv2.FONT_HERSHEY_SIMPLEX, font_scale, 4)[0]
             text_x = (CANVAS_WIDTH - text_size[0]) // 2
             text_y = CANVAS_HEIGHT // 3
             
-            # Draw background box
-            padding = 20
-            cv2.rectangle(canvas, 
-                        (text_x - padding, text_y - text_size[1] - padding),
-                        (text_x + text_size[0] + padding, text_y + padding),
-                        (0, 0, 0), -1)
-            cv2.rectangle(canvas, 
-                        (text_x - padding, text_y - text_size[1] - padding),
-                        (text_x + text_size[0] + padding, text_y + padding),
-                        (0, 255, 255), 3)
+            # Enhanced background with multiple layers
+            padding = 30
+            bg_x1 = text_x - padding
+            bg_y1 = text_y - text_size[1] - padding
+            bg_x2 = text_x + text_size[0] + padding
+            bg_y2 = text_y + padding
             
-            # Draw text
+            # Outer glow effect
+            for i in range(5):
+                glow_alpha = alpha * (0.8 - i * 0.15)
+                glow_color = (int(50 * glow_alpha), int(200 * glow_alpha), int(255 * glow_alpha))
+                draw_rounded_rect(canvas, 
+                                (bg_x1 - i*3, bg_y1 - i*3), 
+                                (bg_x2 + i*3, bg_y2 + i*3), 
+                                glow_color, -1, 20 + i*2)
+            
+            # Main background
+            draw_rounded_rect(canvas, (bg_x1, bg_y1), (bg_x2, bg_y2), 
+                            (20, 20, 60), -1, 20)
+            
+            # Animated border
+            border_color = (int(100 * alpha), int(255 * alpha), int(255 * alpha))
+            draw_rounded_rect(canvas, (bg_x1, bg_y1), (bg_x2, bg_y2), 
+                            border_color, 4, 20)
+            
+            # Enhanced text with multiple effects
+            text_color = (int(255 * alpha), int(255 * alpha), int(255 * alpha))
+            shadow_color = (0, 0, 0)
+            
+            # Shadow layers for depth
+            for offset in [(4, 4), (2, 2)]:
+                cv2.putText(canvas, shot_message, 
+                           (text_x + offset[0], text_y + offset[1]), 
+                           cv2.FONT_HERSHEY_SIMPLEX, font_scale, shadow_color, 5)
+            
+            # Main text with gradient-like effect
             cv2.putText(canvas, shot_message, (text_x, text_y), 
-                        cv2.FONT_HERSHEY_SIMPLEX, 1.5, (0, 255, 255), 3)
+                        cv2.FONT_HERSHEY_SIMPLEX, font_scale, text_color, 4)
+            
+            # Highlight overlay
+            highlight_color = (int(150 * alpha), int(255 * alpha), int(200 * alpha))
+            cv2.putText(canvas, shot_message, (text_x, text_y), 
+                        cv2.FONT_HERSHEY_SIMPLEX, font_scale, highlight_color, 2)
         else:
             shot_message = ""
 
         if countdown_active:
             countdown_num = update_countdown()
             if countdown_num is not None:
-                # Draw large countdown number
+                # Enhanced countdown with pulsing animation
                 countdown_text = str(countdown_num)
-                text_size = cv2.getTextSize(countdown_text, cv2.FONT_HERSHEY_SIMPLEX, 3, 5)[0]
+                
+                # Pulsing effect based on time
+                pulse_time = (time.time() - countdown_start_time) % 1.0
+                pulse_scale = 1.0 + 0.5 * np.sin(pulse_time * 2 * np.pi * 2)
+                
+                font_scale = 4 * pulse_scale
+                text_size = cv2.getTextSize(countdown_text, cv2.FONT_HERSHEY_SIMPLEX, font_scale, 8)[0]
                 text_x = (CANVAS_WIDTH - text_size[0]) // 2
                 text_y = (CANVAS_HEIGHT + text_size[1]) // 2
                 
-                # Draw background circle for countdown
-                cv2.circle(canvas, (text_x + text_size[0]//2, text_y - text_size[1]//2), 80, (0, 0, 0), -1)
-                cv2.circle(canvas, (text_x + text_size[0]//2, text_y - text_size[1]//2), 80, (0, 255, 255), 3)
+                center_x = text_x + text_size[0] // 2
+                center_y = text_y - text_size[1] // 2
                 
-                # Draw countdown number
+                # Animated countdown colors
+                countdown_colors = [
+                    (0, 100, 255),  # Red for 3
+                    (0, 200, 255),  # Orange for 2  
+                    (0, 255, 100),  # Green for 1
+                ]
+                color_idx = max(0, min(len(countdown_colors) - 1, countdown_num - 1))
+                main_color = countdown_colors[color_idx]
+                
+                # Multi-layer circle background with glow
+                base_radius = 100
+                for i in range(8):
+                    glow_radius = int(base_radius * pulse_scale + i * 8)
+                    glow_alpha = 0.8 - i * 0.1
+                    glow_color = tuple(int(c * glow_alpha) for c in main_color)
+                    cv2.circle(canvas, (center_x, center_y), glow_radius, glow_color, -1)
+                
+                # Main circle with gradient effect
+                cv2.circle(canvas, (center_x, center_y), int(base_radius * pulse_scale), (20, 20, 40), -1)
+                cv2.circle(canvas, (center_x, center_y), int(base_radius * pulse_scale), main_color, 6)
+                
+                # Inner highlight circle
+                cv2.circle(canvas, (center_x, center_y), int(base_radius * pulse_scale * 0.8), 
+                          tuple(int(c * 0.3) for c in main_color), -1)
+                
+                # Enhanced countdown number with multiple effects
+                shadow_offset = int(6 * pulse_scale)
+                
+                # Multiple shadow layers for depth
+                for offset in [(shadow_offset, shadow_offset), (shadow_offset//2, shadow_offset//2)]:
+                    cv2.putText(canvas, countdown_text, 
+                               (text_x + offset[0], text_y + offset[1]), 
+                               cv2.FONT_HERSHEY_SIMPLEX, font_scale, (0, 0, 0), 10)
+                
+                # Main countdown number
                 cv2.putText(canvas, countdown_text, (text_x, text_y), 
-                           cv2.FONT_HERSHEY_SIMPLEX, 3, (0, 255, 255), 5)
+                           cv2.FONT_HERSHEY_SIMPLEX, font_scale, (255, 255, 255), 8)
+                
+                # Highlight overlay
+                cv2.putText(canvas, countdown_text, (text_x, text_y), 
+                           cv2.FONT_HERSHEY_SIMPLEX, font_scale, main_color, 4)
 
-        # Show controls at bottom of screen
-        cv2.putText(canvas, "r/space: countdown spawn | q: quit | d: debug | k: keypoints | p: palm", 
-                   (10, CANVAS_HEIGHT - 20), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 1)
+        # Enhanced controls display at bottom
+        controls_text = "R/SPACE: Start | Q: Quit | D: Debug | K: Keypoints | P: Palm"
+        controls_size = cv2.getTextSize(controls_text, cv2.FONT_HERSHEY_SIMPLEX, 0.5, 1)[0]
+        controls_x = (CANVAS_WIDTH - controls_size[0]) // 2
+        controls_y = CANVAS_HEIGHT - 15
+        
+        # Background for controls
+        draw_rounded_rect(canvas, 
+                         (controls_x - 10, controls_y - controls_size[1] - 5), 
+                         (controls_x + controls_size[0] + 10, controls_y + 5), 
+                         (25, 25, 25), -1, 8)
+        
+        # Controls text with better visibility
+        cv2.putText(canvas, controls_text, (controls_x + 1, controls_y + 1), 
+                   cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 0), 2)  # Shadow
+        cv2.putText(canvas, controls_text, (controls_x, controls_y), 
+                   cv2.FONT_HERSHEY_SIMPLEX, 0.5, (200, 200, 200), 1)  # Main text
 
         # Display the processed video
         cv2.imshow('Ball Physics Demo', canvas)
