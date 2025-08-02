@@ -6,11 +6,14 @@ if [ ! -f "model/body_coco.pth" ]; then
     exit 1
 fi
 xhost +local:docker 2>/dev/null || echo "Note: GUI may not work on this system"
-docker run -it --rm \
+docker run --ipc=host --gpus all --runtime=runc --interactive -it \
+  --shm-size=10gb \
   -e DISPLAY=$DISPLAY \
   -v /tmp/.X11-unix:/tmp/.X11-unix:rw \
-  -v /dev/video0:/dev/video0 \
-  --device /dev/video0:/dev/video0 \
+  --volume="/dev:/dev" \
   --privileged \
-  -v $(pwd)/model:/app/model \
   pytorch-openpose
+
+# --device /dev/video1:/dev/video1 \
+#  -v $(pwd)/model:/app/model \
+# -v /dev/video1:/dev/video1 \

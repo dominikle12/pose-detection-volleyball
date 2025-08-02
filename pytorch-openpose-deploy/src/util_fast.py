@@ -77,23 +77,36 @@ def draw_bodypose(canvas, candidate, subset):
     # Draw keypoints first (all at once for each person)
     for n in range(len(subset)):
         for i in range(18):
-            index = int(subset[n][i])
-            if index == -1:
+            try:
+                index = int(subset[n, i])  # Use comma notation for numpy array indexing
+                if index == -1:
+                    continue
+                if index >= len(candidate):
+                    continue
+                x, y = int(candidate[index][0]), int(candidate[index][1])
+                cv2.circle(canvas, (x, y), 4, LIMB_COLORS[i], thickness=-1)
+            except (IndexError, ValueError):
                 continue
-            x, y = int(candidate[index][0]), int(candidate[index][1])
-            cv2.circle(canvas, (x, y), 4, LIMB_COLORS[i], thickness=-1)
     
     # Now draw limbs
     for n in range(len(subset)):
         for i in range(17):
-            index = subset[n][np.array(LIMB_SEQ[i]) - 1]
-            if -1 in index:
+            try:
+                limb_seq = LIMB_SEQ[i]
+                idx1 = int(subset[n, limb_seq[0] - 1])  # Use comma notation for numpy array indexing
+                idx2 = int(subset[n, limb_seq[1] - 1])  # Use comma notation for numpy array indexing
+                
+                if idx1 == -1 or idx2 == -1:
+                    continue
+                if idx1 >= len(candidate) or idx2 >= len(candidate):
+                    continue
+                
+                # Get coordinates more efficiently
+                Y = [int(candidate[idx1][0]), int(candidate[idx2][0])]
+                X = [int(candidate[idx1][1]), int(candidate[idx2][1])]
+                mX, mY = np.mean(X), np.mean(Y)
+            except (IndexError, ValueError):
                 continue
-            
-            # Get coordinates more efficiently
-            Y = candidate[index.astype(int), 0].astype(int)
-            X = candidate[index.astype(int), 1].astype(int)
-            mX, mY = np.mean(X), np.mean(Y)
             
             # Use a simpler line drawing when possible
             if stickwidth <= 1:

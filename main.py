@@ -843,6 +843,7 @@ def pose_estimation_thread_func():
     
     print("Pose estimation thread started")
     while pose_thread_running:
+        img = None
         try:
             # Get the next frame from the queue with a timeout
             try:
@@ -853,6 +854,7 @@ def pose_estimation_thread_func():
             # Check if the image is valid
             if img is None or img.size == 0 or img.shape[0] == 0 or img.shape[1] == 0:
                 print("Warning: Empty image in pose thread")
+                pose_queue.task_done()
                 continue
             
             # Check if we need to resize for detection
@@ -883,12 +885,14 @@ def pose_estimation_thread_func():
             except queue.Full:
                 pass  # Skip this frame if queue is still full
             
+            # Mark task as done only if we successfully got an item
+            pose_queue.task_done()
+            
         except Exception as e:
             print(f"Error in pose thread: {e}")
-            
-        finally:
-            # Always mark the task as done
-            pose_queue.task_done()
+            # Only mark task done if we actually got an item from the queue
+            if img is not None:
+                pose_queue.task_done()
     
     print("Pose estimation thread stopped")
 

@@ -6,38 +6,47 @@ import time
 import threading
 import queue
 import os
+from collections import deque
 
 from src import util_fast
 from src.body_fast import Body
+from config import Config
 
-# Performance configuration
-KEYPOINT_CONFIDENCE_THRESHOLD = 0.1  # Lowered threshold for detection
-POSE_SKIP_FRAMES = 3  # Process every other frame for better performance
-RENDER_SKIP_FRAMES = 1  # Show all frames for visual feedback
-USE_LOWER_RESOLUTION = True  # Process smaller images for faster detection
-DETECTION_SCALE_FACTOR = 0.3  # Scale down images by this factor for detection
+# Load configuration (now centralized)
+cfg = Config()
 
-# Ball physics constants
-BALL_RADIUS = 20
-GRAVITY = 0.9  # Strong gravity
-ELASTICITY = 0.7  # Reduced elasticity for more realistic bounces
-FRICTION = 0.98  # Friction coefficient
-ARM_COLLISION_PADDING = 10  # Distance beyond ball radius for arm collision detection
+# Apply performance profile if specified
+profile = os.getenv('PERFORMANCE_PROFILE', 'balanced')
+if profile != 'balanced':
+    profile_settings = Config.get_performance_profile(profile)
+    for key, value in profile_settings.items():
+        setattr(cfg, key, value)
+    print(f"Applied {profile} performance profile")
 
-# Palm detection constants
-PALM_BASE_SIZE = 40  # Base palm size for collision detection
-MIN_PALM_SIZE = 30  # Minimum palm size regardless of distance
-MAX_PALM_SIZE = 60  # Maximum palm size regardless of distance
-PALM_DISTANCE_FACTOR = 1.5  # How much the palm size changes with hand position
-WRIST_ELBOW_REF_DISTANCE = 100  # Reference distance between wrist and elbow at medium range
-
-# Debug flags
-DEBUG_MODE = False  # Set to True for detailed debugging info
-REDUCED_MODEL_PRECISION = True  # Use FP16 precision if available with torch.amp
-DISPLAY_KEYPOINTS = True  # Set to False for even better performance
-ENABLE_PALM_DETECTION = True  # Enable palm collision detection
+# Configuration aliases for backward compatibility
+KEYPOINT_CONFIDENCE_THRESHOLD = cfg.KEYPOINT_CONFIDENCE_THRESHOLD
+POSE_SKIP_FRAMES = cfg.POSE_SKIP_FRAMES
+RENDER_SKIP_FRAMES = cfg.RENDER_SKIP_FRAMES
+USE_LOWER_RESOLUTION = cfg.USE_LOWER_RESOLUTION
+DETECTION_SCALE_FACTOR = cfg.DETECTION_SCALE_FACTOR
+BALL_RADIUS = cfg.BALL_RADIUS
+GRAVITY = cfg.GRAVITY
+ELASTICITY = cfg.ELASTICITY
+FRICTION = cfg.FRICTION
+ARM_COLLISION_PADDING = cfg.ARM_COLLISION_PADDING
+PALM_BASE_SIZE = cfg.PALM_BASE_SIZE
+MIN_PALM_SIZE = cfg.MIN_PALM_SIZE
+MAX_PALM_SIZE = cfg.MAX_PALM_SIZE
+PALM_DISTANCE_FACTOR = cfg.PALM_DISTANCE_FACTOR
+WRIST_ELBOW_REF_DISTANCE = cfg.WRIST_ELBOW_REF_DISTANCE
+DEBUG_MODE = cfg.DEBUG_MODE
+REDUCED_MODEL_PRECISION = cfg.REDUCED_MODEL_PRECISION
+DISPLAY_KEYPOINTS = cfg.DISPLAY_KEYPOINTS
+ENABLE_PALM_DETECTION = cfg.ENABLE_PALM_DETECTION
 
 print(f"Starting ball physics demo with optimized settings...")
+if DEBUG_MODE:
+    cfg.print_config()
 
 # Initialize body estimation with optimized settings
 try:
@@ -85,9 +94,9 @@ if not cap.isOpened():
     print("Error: Could not open camera")
     exit(1)
 
-# Set camera properties for better performance
-cap.set(cv2.CAP_PROP_FPS, 30)
-cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
+# Set camera properties for better performance (configurable)
+cap.set(cv2.CAP_PROP_FPS, cfg.CAMERA_FPS)
+cap.set(cv2.CAP_PROP_BUFFERSIZE, cfg.CAMERA_BUFFER_SIZE)
 try:
     cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*'MJPG'))
 except:
@@ -110,9 +119,12 @@ if USE_LOWER_RESOLUTION:
     DETECTION_WIDTH = int(CANVAS_WIDTH * DETECTION_SCALE_FACTOR)
     DETECTION_HEIGHT = int(CANVAS_HEIGHT * DETECTION_SCALE_FACTOR)
     print(f"Using scaled detection resolution: {DETECTION_WIDTH}x{DETECTION_HEIGHT}")
+    # Pre-allocate detection buffer for optimized resizing
+    detection_buffer = np.empty((DETECTION_HEIGHT, DETECTION_WIDTH, 3), dtype=np.uint8)
 else:
     DETECTION_WIDTH = CANVAS_WIDTH
     DETECTION_HEIGHT = CANVAS_HEIGHT
+    detection_buffer = None
 
 # Ball state variables - initialize at center of screen
 ball_pos = np.array([CANVAS_WIDTH // 2, - CANVAS_HEIGHT + BALL_RADIUS*2], dtype=np.float32)
@@ -169,11 +181,16 @@ fps_last_update = time.time()
 fps_frame_count = 0
 current_fps = 0
 
-# Thread-safe queues for pose estimation
+# Optimized thread-safe queues for pose estimation
 pose_queue = queue.Queue(maxsize=1)
-pose_result_queue = queue.Queue(maxsize=2)  # Buffer for results
+pose_results = deque(maxlen=2)  # Lockless circular buffer for results
 pose_thread_running = False
 pose_result = None
+
+# Pre-allocated buffers for performance
+detection_buffer = None
+temp_vector_2d = np.empty(2, dtype=np.float32)
+collision_buffer = np.empty((10, 2), dtype=np.float32)
 
 # Track position history for better collision detection
 last_arm_positions = []
@@ -195,10 +212,13 @@ def point_to_segment_distance(p, v, w):
     v: segment start point as a numpy array [x, y]
     w: segment end point as a numpy array [x, y]
     """
-    # Convert all inputs to float32 to ensure consistent calculations
-    p = p.astype(np.float32)
-    v = v.astype(np.float32)
-    w = w.astype(np.float32)
+    # Use pre-allocated temp vectors and ensure float32 type (optimized)
+    if p.dtype != np.float32:
+        p = p.astype(np.float32)
+    if v.dtype != np.float32:
+        v = v.astype(np.float32)
+    if w.dtype != np.float32:
+        w = w.astype(np.float32)
     
     # Vector from v to w
     segment_vector = w - v
@@ -355,12 +375,13 @@ def check_wall_collision():
         ball_on_ground = False
         ball_ground_start_time = 0  # Reset the timer when ball leaves ground
 
-    # Cap velocity if collision occurred
+    # Cap velocity if collision occurred (optimized)
     if collision_happened:
         max_velocity = 15.0  # Max velocity limit
-        current_magnitude = np.linalg.norm(ball_velocity)
-        if current_magnitude > max_velocity:
-            ball_velocity = (ball_velocity / current_magnitude) * max_velocity
+        velocity_mag_sq = np.dot(ball_velocity, ball_velocity)  # Squared magnitude (faster)
+        if velocity_mag_sq > max_velocity * max_velocity:
+            velocity_mag = np.sqrt(velocity_mag_sq)
+            ball_velocity *= (max_velocity / velocity_mag)
         
         if DEBUG_MODE:
             print(f"Ball position after collision: ({ball_pos[0]:.1f}, {ball_pos[1]:.1f})")
@@ -524,7 +545,7 @@ def detect_palms(candidate, subset):
 
 def check_palm_collision():
     """
-    Check for collisions between the ball and palm positions.
+    Check for collisions between the ball and palm positions (optimized).
     Palm collisions should provide a more intuitive interaction than arm-based collisions.
     """
     global ball_pos, ball_velocity, ball_active, ball_on_ground, current_score, high_score, last_hit_was_bounce, shot_message, shot_message_time
@@ -534,18 +555,27 @@ def check_palm_collision():
     
     collision_happened = False
     
-    # Check all recent palm positions
+    # Check all recent palm positions (optimized with early exit and squared distances)
     for positions in palm_history:
         for palm in positions:
             # Get palm position and size
-            palm_pos = np.array(palm["position"])
+            palm_pos = np.array(palm["position"], dtype=np.float32)
             palm_size = palm["size"]
             
-            # Calculate distance from ball to palm
-            distance = np.linalg.norm(ball_pos - palm_pos)
-            
-            # Check if close enough for collision
+            # Optimized: Use squared distance first (avoids sqrt)
             collision_threshold = BALL_RADIUS + palm_size
+            collision_threshold_sq = collision_threshold * collision_threshold
+            
+            # Calculate squared distance from ball to palm
+            diff = ball_pos - palm_pos
+            distance_sq = np.dot(diff, diff)
+            
+            # Early exit if too far
+            if distance_sq >= collision_threshold_sq:
+                continue
+                
+            # Only calculate actual distance when collision is likely
+            distance = np.sqrt(distance_sq)
             
             if DEBUG_MODE:
                 print(f"Distance to {palm['side']} palm: {distance:.1f}, threshold: {collision_threshold}")
@@ -693,19 +723,17 @@ def detect_volleyball_shot(palm_positions, ball_pos, velocity_before, velocity_a
     return None, 0
 
 def scale_keypoints(candidate, subset, scale_factor=1.0):
-    """Scale keypoints coordinates if detection was done at a different resolution"""
+    """Scale keypoints coordinates if detection was done at a different resolution (optimized)"""
     if scale_factor == 1.0:
         return candidate, subset
     
-    # Create a copy to avoid modifying the original
-    scaled_candidate = copy.deepcopy(candidate)
+    # Optimized: Use numpy vectorized operations instead of loops and deep copy
+    if len(candidate) > 0:
+        scaled_candidate = np.array(candidate, dtype=np.float32)
+        scaled_candidate[:, :2] *= scale_factor  # Scale only x,y coordinates
+        return scaled_candidate.tolist(), subset
     
-    # Scale the x,y coordinates
-    for i in range(len(scaled_candidate)):
-        scaled_candidate[i][0] = scaled_candidate[i][0] * scale_factor
-        scaled_candidate[i][1] = scaled_candidate[i][1] * scale_factor
-    
-    return scaled_candidate, subset
+    return candidate, subset
 
 def check_arm_collision(candidate, subset):
     """Check for collisions between the ball and arm segments"""
@@ -765,14 +793,23 @@ def check_arm_collision(candidate, subset):
         if len(last_arm_positions) > ARM_HISTORY_LENGTH:
             last_arm_positions.pop(0)
     
-    # Check all recent arm positions to detect fast movements
+    # Check all recent arm positions to detect fast movements (optimized)
+    collision_threshold = BALL_RADIUS + ARM_COLLISION_PADDING
+    collision_threshold_sq = collision_threshold * collision_threshold
+    
     for positions in last_arm_positions:
         for name, start, end in positions:
+            # Optimized: Quick bounding box check first
+            min_x, max_x = min(start[0], end[0]), max(start[0], end[0])
+            min_y, max_y = min(start[1], end[1]), max(start[1], end[1])
+            
+            # Early exit if ball is far from arm segment bounding box
+            if (ball_pos[0] < min_x - collision_threshold or ball_pos[0] > max_x + collision_threshold or
+                ball_pos[1] < min_y - collision_threshold or ball_pos[1] > max_y + collision_threshold):
+                continue
+            
             # Calculate distance from ball to arm segment
             distance, closest_point = point_to_segment_distance(ball_pos, start, end)
-            
-            # Check if close enough for collision
-            collision_threshold = BALL_RADIUS + ARM_COLLISION_PADDING
             
             if DEBUG_MODE:
                 print(f"Distance to {name}: {distance:.1f}, threshold: {collision_threshold}")
@@ -843,6 +880,7 @@ def pose_estimation_thread_func():
     
     print("Pose estimation thread started")
     while pose_thread_running:
+        img = None
         try:
             # Get the next frame from the queue with a timeout
             try:
@@ -850,45 +888,58 @@ def pose_estimation_thread_func():
             except queue.Empty:
                 continue
             
-            # Check if the image is valid
-            if img is None or img.size == 0 or img.shape[0] == 0 or img.shape[1] == 0:
-                print("Warning: Empty image in pose thread")
+            # Enhanced image validation
+            if img is None:
+                print("Warning: None image in pose thread")
+                pose_queue.task_done()
                 continue
             
-            # Check if we need to resize for detection
+            if not hasattr(img, 'shape') or len(img.shape) != 3:
+                print("Warning: Invalid image format in pose thread")
+                pose_queue.task_done()
+                continue
+                
+            if img.size == 0 or img.shape[0] == 0 or img.shape[1] == 0:
+                print("Warning: Empty image in pose thread")
+                pose_queue.task_done()
+                continue
+            
+            # Check if we need to resize for detection (fixed buffer issue)
             if USE_LOWER_RESOLUTION:
-                # Resize for faster processing
-                processed_img = cv2.resize(img, (DETECTION_WIDTH, DETECTION_HEIGHT))
+                # Resize for faster processing (back to standard approach)
+                processed_img = cv2.resize(img, (DETECTION_WIDTH, DETECTION_HEIGHT), interpolation=cv2.INTER_LINEAR)
             else:
                 processed_img = img
                 
-            # Run pose estimation
-            candidate, subset = body_estimation(processed_img)
+            # Run pose estimation with error handling
+            try:
+                candidate, subset = body_estimation(processed_img)
+                if candidate is None or subset is None:
+                    print("Warning: Pose estimation returned None")
+                    pose_queue.task_done()
+                    continue
+            except Exception as pose_error:
+                print(f"Error in pose estimation: {pose_error}")
+                pose_queue.task_done()
+                continue
             
             # Scale keypoints back to original size if needed
             if USE_LOWER_RESOLUTION:
                 scale_factor = CANVAS_WIDTH / DETECTION_WIDTH
                 candidate, subset = scale_keypoints(candidate, subset, scale_factor)
             
-            # Put the result in the result queue
-            try:
-                # Use non-blocking put and clear old items if queue is full
-                if pose_result_queue.full():
-                    try:
-                        pose_result_queue.get_nowait()  # Remove old result
-                    except queue.Empty:
-                        pass
-                pose_result_queue.put_nowait((candidate, subset))
-                new_pose_result = True
-            except queue.Full:
-                pass  # Skip this frame if queue is still full
+            # Put the result in the optimized circular buffer (lockless)
+            pose_results.append((candidate, subset))
+            new_pose_result = True
+            
+            # Mark task as done only if we successfully got an item
+            pose_queue.task_done()
             
         except Exception as e:
             print(f"Error in pose thread: {e}")
-            
-        finally:
-            # Always mark the task as done
-            pose_queue.task_done()
+            # Only mark task done if we actually got an item from the queue
+            if img is not None:
+                pose_queue.task_done()
     
     print("Pose estimation thread stopped")
 
@@ -927,53 +978,58 @@ try:
         # Accumulate time for fixed physics updates
         accumulated_time += delta_time
         
-        # Get camera frame
-        ret, oriImg = cap.read()
-        if not ret:
-            print("Failed to grab frame")
-            time.sleep(0.01)
+        # Get camera frame with enhanced error handling
+        try:
+            ret, oriImg = cap.read()
+            if not ret:
+                print("Failed to grab frame")
+                time.sleep(0.01)
+                continue
+            
+            if oriImg is None or oriImg.size == 0:
+                print("Warning: Empty frame from camera")
+                time.sleep(0.01)
+                continue
+                
+        except Exception as camera_error:
+            print(f"Camera error: {camera_error}")
+            time.sleep(0.1)
             continue
             
         # Flip the image horizontally for more intuitive interaction
         oriImg = cv2.flip(oriImg, 1)
         
-        # Create canvas copy efficiently
-        canvas = copy.copy(oriImg)
+        # Create canvas copy efficiently (optimized)
+        canvas = oriImg.copy()  # More efficient than copy.copy() for numpy arrays
         
-        # Check for new pose results (non-blocking)
-        if new_pose_result:
-            try:
-                pose_result = pose_result_queue.get_nowait()
-                last_valid_keypoints = pose_result
-                # Update palm positions based on the new pose
-                if ENABLE_PALM_DETECTION:
-                    detect_palms(last_valid_keypoints[0], last_valid_keypoints[1])
-                new_pose_result = False
-            except queue.Empty:
-                pass
+        # Check for new pose results (optimized with circular buffer)
+        if new_pose_result and pose_results:
+            pose_result = pose_results[-1]  # Get latest result from circular buffer
+            last_valid_keypoints = pose_result
+            # Update palm positions based on the new pose
+            if ENABLE_PALM_DETECTION:
+                detect_palms(last_valid_keypoints[0], last_valid_keypoints[1])
+            new_pose_result = False
         
         # Process pose detection on a schedule
         frame_count += 1
         
         # Only submit a new frame for pose analysis if the queue is empty
-        # and it's time to do another detection
+        # and it's time to do another detection (fixed copying issue)
         if frame_count % POSE_SKIP_FRAMES == 0 and pose_queue.empty():
             try:
-                img_for_thread = oriImg.copy()  # Make a copy for the thread
+                # Always make a copy to avoid threading issues
+                img_for_thread = oriImg.copy()
                 pose_queue.put_nowait(img_for_thread)  # Non-blocking put
             except queue.Full:
                 pass  # Queue is full, skip this frame
         
-        # Run fixed timestep physics updates
+        # Run fixed timestep physics updates (optimized with max iterations)
         physics_update_count = 0
-        while accumulated_time >= fixed_time_step:
+        max_physics_steps = 3  # Prevent performance spikes
+        while accumulated_time >= fixed_time_step and physics_update_count < max_physics_steps:
             physics_update_count += 1
             physics_counter += 1
-            
-            # Limit physics updates per frame to prevent spiral of death
-            if physics_update_count > 5:
-                accumulated_time = 0
-                break
             
             # Check for palm collisions first (preferred over arm collisions)
             if ENABLE_PALM_DETECTION:
@@ -1002,7 +1058,10 @@ try:
         # Draw body pose if we have valid keypoints and display is enabled
         if DISPLAY_KEYPOINTS and last_valid_keypoints is not None:
             try:
-                canvas = util_fast.draw_bodypose(canvas, last_valid_keypoints[0], last_valid_keypoints[1])
+                # Validate keypoints before drawing
+                candidate, subset = last_valid_keypoints
+                if candidate is not None and subset is not None and len(candidate) > 0:
+                    canvas = util_fast.draw_bodypose(canvas, candidate, subset)
                 
                 # For debugging - highlight arm segments used for collision detection
                 if DEBUG_MODE:

@@ -16,7 +16,7 @@ class Body(object):
         self.model = bodypose_model()
         if torch.cuda.is_available():
             self.model = self.model.cuda()
-        model_weights = torch.load(model_path, map_location=torch.device('cuda' if torch.cuda.is_available() else 'cpu'))
+        model_weights = torch.load(model_path, map_location=torch.device('cuda' if torch.cuda.is_available() else 'cpu'), weights_only=True)
         self.model.load_state_dict(model_weights, strict=False)
         self.model.eval()
         

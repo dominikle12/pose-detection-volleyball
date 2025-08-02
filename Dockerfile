@@ -31,7 +31,7 @@ COPY requirements.txt /app/requirements.txt
 
 # Install Python dependencies
 RUN pip3 install --no-cache-dir -r requirements.txt
-RUN pip3 install --no-cache-dir torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cpu
+RUN pip3 install --no-cache-dir torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu121
 
 # Copy the entire project
 COPY . /app/
