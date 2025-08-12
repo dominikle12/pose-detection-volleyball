@@ -11,6 +11,7 @@ from collections import deque
 from src import util_fast
 from src.body_fast import Body
 from config import Config
+from menu_system import MenuSystem
 
 # Load configuration (now centralized)
 cfg = Config()
@@ -1112,6 +1113,9 @@ pose_thread = threading.Thread(target=pose_estimation_thread_func)
 pose_thread.daemon = True
 pose_thread.start()
 
+# Initialize menu system
+menu = MenuSystem(CANVAS_WIDTH, CANVAS_HEIGHT)
+
 # Main loop
 try:
     print("Starting main loop - press Q to quit, R to reset ball, SPACE to activate")
@@ -1187,36 +1191,44 @@ try:
             except queue.Full:
                 pass  # Queue is full, skip this frame
         
-        # Run fixed timestep physics updates (optimized with max iterations)
-        physics_update_count = 0
-        max_physics_steps = 3  # Prevent performance spikes
-        while accumulated_time >= fixed_time_step and physics_update_count < max_physics_steps:
-            physics_update_count += 1
-            physics_counter += 1
-            
-            # Check for palm collisions first (preferred over arm collisions)
-            if ENABLE_PALM_DETECTION:
-                palm_collision = check_palm_collision()
+        # Run physics updates only during gameplay
+        if menu.is_playing():
+            # Run fixed timestep physics updates (optimized with max iterations)
+            physics_update_count = 0
+            max_physics_steps = 3  # Prevent performance spikes
+            while accumulated_time >= fixed_time_step and physics_update_count < max_physics_steps:
+                physics_update_count += 1
+                physics_counter += 1
                 
-                # If no palm collision, check for arm collision as fallback
-                if not palm_collision and last_valid_keypoints is not None:
+                # Check for palm collisions first (preferred over arm collisions)
+                if ENABLE_PALM_DETECTION:
+                    palm_collision = check_palm_collision()
+                    
+                    # If no palm collision, check for arm collision as fallback
+                    if not palm_collision and last_valid_keypoints is not None:
+                        check_arm_collision(last_valid_keypoints[0], last_valid_keypoints[1])
+                # If palm detection disabled, just use arm collision
+                elif last_valid_keypoints is not None:
                     check_arm_collision(last_valid_keypoints[0], last_valid_keypoints[1])
-            # If palm detection disabled, just use arm collision
-            elif last_valid_keypoints is not None:
-                check_arm_collision(last_valid_keypoints[0], last_valid_keypoints[1])
+                
+                # Update physics with fixed time step
+                update_physics(fixed_time_step)
+                accumulated_time -= fixed_time_step
+        else:
+            # Reset accumulated time when not playing to prevent physics buildup
+            accumulated_time = 0
+        
+        # Game-specific logic only during gameplay
+        if menu.is_playing():
+            # Update countdown if active
+            countdown_number = update_countdown()
             
-            # Update physics with fixed time step
-            update_physics(fixed_time_step)
-            accumulated_time -= fixed_time_step
-        
-        # Update countdown if active
-        countdown_number = update_countdown()
-        
-        # Check for auto-reset if ball has been on ground too long
-        if ball_on_ground and ball_active and ball_ground_start_time > 0:
-            if time.time() - ball_ground_start_time > auto_reset_duration:
-                print("Ball auto-reset after being on ground for 3 seconds")
-                start_countdown_spawn()
+            # Check for auto-reset if ball has been on ground too long
+            if ball_on_ground and ball_active and ball_ground_start_time > 0:
+                if time.time() - ball_ground_start_time > auto_reset_duration:
+                    # End game when ball stays on ground too long
+                    print("Game over - ball stayed on ground too long!")
+                    menu.show_game_over(current_score)
 
         # Draw body pose if we have valid keypoints and display is enabled
         if DISPLAY_KEYPOINTS and last_valid_keypoints is not None:
@@ -1285,10 +1297,12 @@ try:
                                (int(palm_pos[0] + palm_size), int(palm_pos[1])),
                                cv2.FONT_HERSHEY_SIMPLEX, 0.5, palm_color, 1)
         
-        # Draw floor line at bottom of screen
-        cv2.line(canvas, (0, floor_y), (CANVAS_WIDTH, floor_y), (0, 255, 255), 1)
-        
-        # Draw ball with a dynamic color based on velocity
+        # Draw game elements only during gameplay
+        if menu.is_playing():
+            # Draw floor line at bottom of screen
+            cv2.line(canvas, (0, floor_y), (CANVAS_WIDTH, floor_y), (0, 255, 255), 1)
+            
+            # Draw ball with a dynamic color based on velocity
         velocity_magnitude = np.linalg.norm(ball_velocity)
         color_intensity = min(255, int(velocity_magnitude * 15))
         
@@ -1592,46 +1606,73 @@ try:
         cv2.putText(canvas, controls_text, (controls_x, controls_y), 
                    cv2.FONT_HERSHEY_SIMPLEX, 0.5, (200, 200, 200), 1)  # Main text
 
-        # Display the processed video
-        cv2.imshow('Ball Physics Demo', canvas)
+        # Display menu or game based on state
+        if menu.is_in_menu():
+            # Draw menu on top of the camera feed or create a dark overlay
+            menu.draw_current_screen(canvas)
+            cv2.imshow('Ball Physics Demo - Volleyball Edition', canvas)
+        else:
+            # Display the processed video during gameplay
+            cv2.imshow('Ball Physics Demo - Volleyball Edition', canvas)
         
         # Check for key presses - use waitKey(1) for maximum responsiveness
         key = cv2.waitKey(1) & 0xFF
-        if key == ord('q'):
-            break
-        elif key == ord('r'):
-            # Start countdown spawn instead of immediate reset
-            start_countdown_spawn()
-            print("Ball countdown spawn started")
-        elif key == ord(' '):
-            # Start countdown spawn if ball is not active, otherwise give it a kick
-            if not ball_active and not countdown_active:
+        
+        # Handle menu input if not playing
+        if menu.is_in_menu():
+            action = menu.handle_key_input(key)
+            if action == "quit":
+                break
+            elif action == "start_game":
+                # Initialize game state
+                menu.set_game_start_time()
+                start_countdown_spawn()
+                print(f"Game started for player: {menu.current_player}")
+            elif action == "restart_game":
+                # Reset game state
+                menu.set_game_start_time()
+                current_score = 0
+                start_countdown_spawn()
+                print(f"Game restarted for player: {menu.current_player}")
+        
+        # Handle game controls when playing
+        elif menu.is_playing():
+            if key == ord('q'):
+                # End game and show game over screen
+                menu.show_game_over(current_score)
+            elif key == ord('r'):
+                # Start countdown spawn instead of immediate reset
                 start_countdown_spawn()
                 print("Ball countdown spawn started")
-            elif ball_active:
-                # Give ball a small kick if already active
-                ball_velocity += np.array([1, -8], dtype=np.float32)
-                print("Ball kicked")
-        elif key == ord('d'):
-            # Toggle debug mode
-            DEBUG_MODE = not DEBUG_MODE
-            print(f"Debug mode: {DEBUG_MODE}")
-        elif key == ord('k'):
-            # Toggle keypoint display for even better performance
-            DISPLAY_KEYPOINTS = not DISPLAY_KEYPOINTS
-            print(f"Keypoint display: {DISPLAY_KEYPOINTS}")
-        elif key == ord('p'):
-            # Toggle palm detection
-            ENABLE_PALM_DETECTION = not ENABLE_PALM_DETECTION
-            print(f"Palm detection: {ENABLE_PALM_DETECTION}")
-        elif key == ord('+'):
-            # Increase palm size multiplier
-            PALM_DISTANCE_FACTOR += 0.1
-            print(f"Palm distance factor: {PALM_DISTANCE_FACTOR:.1f}")
-        elif key == ord('-'):
-            # Decrease palm size multiplier
-            PALM_DISTANCE_FACTOR = max(0.5, PALM_DISTANCE_FACTOR - 0.1)
-            print(f"Palm distance factor: {PALM_DISTANCE_FACTOR:.1f}")
+            elif key == ord(' '):
+                # Start countdown spawn if ball is not active, otherwise give it a kick
+                if not ball_active and not countdown_active:
+                    start_countdown_spawn()
+                    print("Ball countdown spawn started")
+                elif ball_active:
+                    # Give ball a small kick if already active
+                    ball_velocity += np.array([1, -8], dtype=np.float32)
+                    print("Ball kicked")
+            elif key == ord('d'):
+                # Toggle debug mode
+                DEBUG_MODE = not DEBUG_MODE
+                print(f"Debug mode: {DEBUG_MODE}")
+            elif key == ord('k'):
+                # Toggle keypoint display for even better performance
+                DISPLAY_KEYPOINTS = not DISPLAY_KEYPOINTS
+                print(f"Keypoint display: {DISPLAY_KEYPOINTS}")
+            elif key == ord('p'):
+                # Toggle palm detection
+                ENABLE_PALM_DETECTION = not ENABLE_PALM_DETECTION
+                print(f"Palm detection: {ENABLE_PALM_DETECTION}")
+            elif key == ord('+'):
+                # Increase palm size multiplier
+                PALM_DISTANCE_FACTOR += 0.1
+                print(f"Palm distance factor: {PALM_DISTANCE_FACTOR:.1f}")
+            elif key == ord('-'):
+                # Decrease palm size multiplier
+                PALM_DISTANCE_FACTOR = max(0.5, PALM_DISTANCE_FACTOR - 0.1)
+                print(f"Palm distance factor: {PALM_DISTANCE_FACTOR:.1f}")
 except KeyboardInterrupt:
     print("Program interrupted by user")
 except Exception as e:

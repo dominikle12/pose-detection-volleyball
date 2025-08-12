@@ -54,4 +54,7 @@ Thumbs.db
 
 # Deployment package files
 pytorch-openpose-deploy.tar.gz
-pytorch-openpose-deploy/
+pytorch-openpose-deploy/__pycache__/
+pytorch-openpose-deploy/data/
+pytorch-openpose-deploy/model/
+pytorch-openpose-deploy/src/__pycache__/

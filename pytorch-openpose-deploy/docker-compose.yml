@@ -1,0 +1,50 @@
+version: '3.3'
+
+services:
+  pytorch-openpose:
+    image: pytorch-openpose
+    container_name: pytorch-openpose-app
+    ipc: host
+    stdin_open: true
+    tty: true
+    environment:
+      - DISPLAY=${DISPLAY}
+      - PYTHONUNBUFFERED=1
+    volumes:
+      - /tmp/.X11-unix:/tmp/.X11-unix:rw
+      - .:/app
+      - /dev:/dev
+      - leaderboard-data:/app/data
+    privileged: true
+    shm_size: 10gb
+    working_dir: /app
+    command: python3 main.py
+
+  pytorch-openpose-dev:
+    image: pytorch-openpose
+    container_name: pytorch-openpose-development
+    ipc: host
+    stdin_open: true
+    tty: true
+    environment:
+      - DISPLAY=${DISPLAY}
+      - PYTHONUNBUFFERED=1
+      - NVIDIA_VISIBLE_DEVICES=all
+    volumes:
+      - /tmp/.X11-unix:/tmp/.X11-unix:rw
+      - .:/app
+      - /dev:/dev
+      - /usr/lib/x86_64-linux-gnu/libcuda.so.1:/usr/lib/x86_64-linux-gnu/libcuda.so.1
+      - /usr/lib/x86_64-linux-gnu/libnvidia-ml.so.1:/usr/lib/x86_64-linux-gnu/libnvidia-ml.so.1
+    devices:
+      - /dev/video0:/dev/video0
+      - /dev/nvidia0:/dev/nvidia0
+      - /dev/nvidiactl:/dev/nvidiactl
+      - /dev/nvidia-uvm:/dev/nvidia-uvm
+    privileged: true
+    shm_size: 10gb
+    working_dir: /app
+    command: bash
+
+volumes:
+  leaderboard-data:

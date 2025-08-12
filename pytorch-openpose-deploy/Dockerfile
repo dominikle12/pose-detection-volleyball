@@ -36,8 +36,8 @@ RUN pip3 install --no-cache-dir torch torchvision torchaudio --index-url https:/
 # Copy the entire project
 COPY . /app/
 
-# Create model directory
-RUN mkdir -p /app/model
+# Create model and data directories
+RUN mkdir -p /app/model /app/data
 
 # Set Python path
 ENV PYTHONPATH=/app:$PYTHONPATH
