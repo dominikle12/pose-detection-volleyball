@@ -156,6 +156,10 @@ successful_volley_timeout = 2.0  # Time window for successful volley
 consecutive_hits = 0  # Track consecutive successful hits
 last_ground_contact_time = 0
 
+# Cooldown system to prevent multiple points per touch
+last_hit_time = 0
+hit_cooldown_duration = 0.5  # 500ms cooldown between hits
+
 # Auto-reset variables
 auto_reset_duration = 3.0  # Reset ball if on ground for 3 seconds
 ball_ground_start_time = 0
@@ -278,6 +282,7 @@ def reset_ball(center_x=None, center_y=None):
     consecutive_hits = 0
     last_successful_hit_time = 0
     last_ground_contact_time = 0
+    last_hit_time = 0  # Reset cooldown
 
     if DEBUG_MODE:
         print(f"Ball reset to position: ({ball_pos[0]}, {ball_pos[1]})")
@@ -302,6 +307,7 @@ def start_countdown_spawn(spawn_x=None):
     ball_trajectory_history = []
     consecutive_hits = 0
     last_successful_hit_time = 0
+    last_hit_time = 0  # Reset cooldown
     last_ground_contact_time = 0
     
     # Start countdown
@@ -641,7 +647,7 @@ def check_palm_collision():
     Check for collisions between the ball and palm positions (optimized).
     Palm collisions should provide a more intuitive interaction than arm-based collisions.
     """
-    global ball_pos, ball_velocity, ball_active, ball_on_ground, current_score, high_score, last_hit_was_bounce, shot_message, shot_message_time
+    global ball_pos, ball_velocity, ball_active, ball_on_ground, current_score, high_score, last_hit_was_bounce, shot_message, shot_message_time, last_hit_time
     
     if not ENABLE_PALM_DETECTION or not palm_history:
         return False
@@ -716,6 +722,12 @@ def check_palm_collision():
 
                 # Enhanced scoring system with trajectory validation
                 current_time = time.time()
+                
+                # Check cooldown to prevent multiple points per touch
+                if current_time - last_hit_time < hit_cooldown_duration:
+                    return True  # Collision detected but no scoring
+                
+                last_hit_time = current_time
                 
                 # Detect volleyball shot type first
                 shot_name, bonus_points = detect_volleyball_shot(palm_positions, ball_pos, velocity_before, ball_velocity)
@@ -901,7 +913,7 @@ def scale_keypoints(candidate, subset, scale_factor=1.0):
 
 def check_arm_collision(candidate, subset):
     """Check for collisions between the ball and arm segments"""
-    global ball_pos, ball_velocity, ball_active, ball_on_ground, last_arm_positions, current_score, high_score, last_hit_was_bounce
+    global ball_pos, ball_velocity, ball_active, ball_on_ground, last_arm_positions, current_score, high_score, last_hit_was_bounce, last_hit_time
     
     # Need valid candidates and subsets
     if candidate is None or subset is None or len(candidate) == 0 or subset.shape[0] == 0:
@@ -1023,11 +1035,16 @@ def check_arm_collision(candidate, subset):
                     # Ball is no longer on ground after being hit
                     ball_on_ground = False
                     
-                    if last_hit_was_bounce and ball_active:
-                        current_score += 1
-                        if current_score > high_score:
-                            high_score = current_score
-                        print(f"Score: {current_score} (High: {high_score})")
+                    # Check cooldown to prevent multiple points per touch
+                    current_time = time.time()
+                    if current_time - last_hit_time >= hit_cooldown_duration:
+                        last_hit_time = current_time
+                        
+                        if last_hit_was_bounce and ball_active:
+                            current_score += 1
+                            if current_score > high_score:
+                                high_score = current_score
+                            print(f"Score: {current_score} (High: {high_score})")
                     last_hit_was_bounce = True
 
                     collision_happened = True
