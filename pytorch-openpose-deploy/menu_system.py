@@ -1,11 +1,30 @@
 import cv2
-import numpy as np
 import time
-from typing import Optional, Tuple, List
+from typing import Optional, Tuple
 from leaderboard import LeaderboardManager
 
 class MenuSystem:
     """Handles all menu screens and user interface"""
+    
+    # Color constants
+    WHITE = (255, 255, 255)
+    CYAN = (0, 255, 255)
+    YELLOW = (255, 255, 0)
+    RED = (255, 0, 0)
+    GREEN = (0, 255, 0)
+    GRAY = (200, 200, 200)
+    DARK_GRAY = (100, 100, 100)
+    LIGHT_GRAY = (150, 150, 150)
+    BACKGROUND_COLOR = 30
+    SELECTION_BG = (50, 50, 50)
+    GOLD = (0, 215, 255)
+    SILVER = (192, 192, 192)
+    BRONZE = (139, 69, 19)
+    
+    # Layout constants
+    MENU_SPACING = 60
+    BUTTON_PADDING = 10
+    MARGIN = 40
     
     def __init__(self, canvas_width: int, canvas_height: int):
         self.canvas_width = canvas_width
@@ -55,18 +74,18 @@ class MenuSystem:
     def draw_menu_item(self, canvas, text: str, y: int, is_selected: bool = False, 
                       font_scale: float = 0.8):
         """Draw a menu item with selection highlighting"""
-        color = (0, 255, 255) if is_selected else (255, 255, 255)
+        color = self.CYAN if is_selected else self.WHITE
         thickness = 3 if is_selected else 2
         
         if is_selected:
             # Draw selection background
             text_size = cv2.getTextSize(text, cv2.FONT_HERSHEY_SIMPLEX, font_scale, thickness)[0]
             x = (self.canvas_width - text_size[0]) // 2
-            padding = 10
+            padding = self.BUTTON_PADDING
             cv2.rectangle(canvas, 
                          (x - padding, y - text_size[1] - padding),
                          (x + text_size[0] + padding, y + padding),
-                         (50, 50, 50), -1)
+                         self.SELECTION_BG, -1)
             cv2.rectangle(canvas, 
                          (x - padding, y - text_size[1] - padding),
                          (x + text_size[0] + padding, y + padding),
@@ -77,23 +96,22 @@ class MenuSystem:
     def draw_main_menu(self, canvas):
         """Draw the main menu screen"""
         # Clear canvas with dark background
-        canvas.fill(30)
+        canvas.fill(self.BACKGROUND_COLOR)
         
         # Title
-        self.draw_centered_text(canvas, "BALL PHYSICS DEMO", 100, 1.5, (0, 255, 255), 3)
-        self.draw_centered_text(canvas, "Volleyball Edition", 140, 0.8, (255, 255, 0), 2)
+        self.draw_centered_text(canvas, "AR VOLLEYBALL", 100, 1.5, self.CYAN, 3)
         
         # Menu items
         menu_items = ["Start Game", "Leaderboard", "Quit"]
         start_y = 250
-        spacing = 60
+        spacing = self.MENU_SPACING
         
         for i, item in enumerate(menu_items):
             self.draw_menu_item(canvas, item, start_y + i * spacing, i == self.selected_menu_item)
         
         # Instructions
         self.draw_centered_text(canvas, "Use UP/DOWN arrows to navigate, ENTER to select", 
-                               self.canvas_height - 80, 0.6, (200, 200, 200), 1)
+                               self.canvas_height - 80, 0.6, self.GRAY, 1)
         
         # Statistics
         total_players = self.leaderboard.get_total_players()
@@ -102,13 +120,13 @@ class MenuSystem:
             if top_scores:
                 best_score = top_scores[0]
                 stats_text = f"Players: {total_players} | Best Score: {best_score['score']} by {best_score['player_name']}"
-                self.draw_centered_text(canvas, stats_text, self.canvas_height - 40, 0.5, (150, 150, 150), 1)
+                self.draw_centered_text(canvas, stats_text, self.canvas_height - 40, 0.5, self.LIGHT_GRAY, 1)
     
     def draw_name_input(self, canvas):
         """Draw the name input screen"""
-        canvas.fill(30)
+        canvas.fill(self.BACKGROUND_COLOR)
         
-        self.draw_centered_text(canvas, "ENTER YOUR NAME", 150, 1.2, (0, 255, 255), 3)
+        self.draw_centered_text(canvas, "ENTER YOUR NAME", 150, 1.2, self.CYAN, 3)
         
         # Input box
         box_width = 400
@@ -117,8 +135,8 @@ class MenuSystem:
         box_y = 220
         
         # Draw input box
-        cv2.rectangle(canvas, (box_x, box_y), (box_x + box_width, box_y + box_height), (100, 100, 100), -1)
-        cv2.rectangle(canvas, (box_x, box_y), (box_x + box_width, box_y + box_height), (0, 255, 255), 2)
+        cv2.rectangle(canvas, (box_x, box_y), (box_x + box_width, box_y + box_height), self.DARK_GRAY, -1)
+        cv2.rectangle(canvas, (box_x, box_y), (box_x + box_width, box_y + box_height), self.CYAN, 2)
         
         # Draw input text
         display_text = self.input_text
@@ -131,83 +149,111 @@ class MenuSystem:
             
         text_x = box_x + 10
         text_y = box_y + 40
-        cv2.putText(canvas, display_text, (text_x, text_y), cv2.FONT_HERSHEY_SIMPLEX, 1.0, (255, 255, 255), 2)
+        cv2.putText(canvas, display_text, (text_x, text_y), cv2.FONT_HERSHEY_SIMPLEX, 1.0, self.WHITE, 2)
         
         # Instructions
         self.draw_centered_text(canvas, "Type your name and press ENTER to start", 
-                               350, 0.7, (200, 200, 200), 2)
+                               350, 0.7, self.GRAY, 2)
         self.draw_centered_text(canvas, "ESC to go back to main menu", 
-                               380, 0.6, (150, 150, 150), 1)
+                               380, 0.6, self.LIGHT_GRAY, 1)
     
     def draw_leaderboard(self, canvas):
         """Draw the leaderboard screen"""
-        canvas.fill(30)
+        canvas.fill(self.BACKGROUND_COLOR)
         
-        self.draw_centered_text(canvas, "LEADERBOARD", 80, 1.3, (0, 255, 255), 3)
+        self.draw_centered_text(canvas, "LEADERBOARD", 80, 1.3, self.CYAN, 3)
         
         top_scores = self.leaderboard.get_top_scores(10)
         
         if not top_scores:
             self.draw_centered_text(canvas, "No scores yet! Be the first to play!", 
-                                   self.canvas_height // 2, 0.8, (255, 255, 0), 2)
+                                   self.canvas_height // 2, 0.8, self.YELLOW, 2)
         else:
+            # Calculate column positions based on canvas width
+            margin = self.MARGIN
+            available_width = self.canvas_width - (2 * margin)
+            
+            # Column widths as percentages
+            rank_width = int(available_width * 0.10)
+            player_width = int(available_width * 0.30)
+            score_width = int(available_width * 0.15)
+            time_width = int(available_width * 0.20)
+            
+            # Column positions
+            rank_x = margin
+            player_x = rank_x + rank_width
+            score_x = player_x + player_width
+            time_x = score_x + score_width
+            date_x = time_x + time_width
+            
+            # Adjust font size for smaller screens
+            font_scale = min(0.6, self.canvas_width / 1000.0)
+            if font_scale < 0.4:
+                font_scale = 0.4
+                
             # Header
             header_y = 140
-            cv2.putText(canvas, "RANK", (50, header_y), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (200, 200, 200), 2)
-            cv2.putText(canvas, "PLAYER", (150, header_y), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (200, 200, 200), 2)
-            cv2.putText(canvas, "SCORE", (350, header_y), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (200, 200, 200), 2)
-            cv2.putText(canvas, "TIME", (450, header_y), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (200, 200, 200), 2)
-            cv2.putText(canvas, "DATE", (550, header_y), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (200, 200, 200), 2)
+            cv2.putText(canvas, "RANK", (rank_x, header_y), cv2.FONT_HERSHEY_SIMPLEX, font_scale, self.GRAY, 2)
+            cv2.putText(canvas, "PLAYER", (player_x, header_y), cv2.FONT_HERSHEY_SIMPLEX, font_scale, self.GRAY, 2)
+            cv2.putText(canvas, "SCORE", (score_x, header_y), cv2.FONT_HERSHEY_SIMPLEX, font_scale, self.GRAY, 2)
+            cv2.putText(canvas, "TIME", (time_x, header_y), cv2.FONT_HERSHEY_SIMPLEX, font_scale, self.GRAY, 2)
+            cv2.putText(canvas, "DATE", (date_x, header_y), cv2.FONT_HERSHEY_SIMPLEX, font_scale, self.GRAY, 2)
             
             # Draw line under header
-            cv2.line(canvas, (40, header_y + 10), (self.canvas_width - 40, header_y + 10), (100, 100, 100), 1)
+            cv2.line(canvas, (margin, header_y + 10), (self.canvas_width - margin, header_y + 10), self.DARK_GRAY, 1)
             
             # Scores
             start_y = 170
+            row_height = max(25, int(font_scale * 50))  # Adjust row height based on font
+            
             for i, entry in enumerate(top_scores):
-                y = start_y + i * 30
+                y = start_y + i * row_height
                 rank = i + 1
                 
                 # Different colors for top 3
                 if rank == 1:
-                    color = (0, 215, 255)  # Gold
+                    color = self.GOLD
                 elif rank == 2:
-                    color = (192, 192, 192)  # Silver
+                    color = self.SILVER
                 elif rank == 3:
-                    color = (139, 69, 19)  # Bronze
+                    color = self.BRONZE
                 else:
-                    color = (255, 255, 255)
+                    color = self.WHITE
                 
-                cv2.putText(canvas, f"{rank}", (50, y), cv2.FONT_HERSHEY_SIMPLEX, 0.6, color, 2)
-                cv2.putText(canvas, entry['player_name'][:15], (150, y), cv2.FONT_HERSHEY_SIMPLEX, 0.6, color, 2)
-                cv2.putText(canvas, f"{entry['score']}", (350, y), cv2.FONT_HERSHEY_SIMPLEX, 0.6, color, 2)
-                cv2.putText(canvas, f"{entry['game_duration']}s", (450, y), cv2.FONT_HERSHEY_SIMPLEX, 0.6, color, 2)
-                cv2.putText(canvas, entry['date'][:10], (550, y), cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 1)
+                # Truncate text based on available space
+                player_name = entry['player_name'][:12] if len(entry['player_name']) > 12 else entry['player_name']
+                date_str = entry['date'][:10] if self.canvas_width >= 640 else entry['date'][:5]
+                
+                cv2.putText(canvas, f"{rank}", (rank_x, y), cv2.FONT_HERSHEY_SIMPLEX, font_scale, color, 2)
+                cv2.putText(canvas, player_name, (player_x, y), cv2.FONT_HERSHEY_SIMPLEX, font_scale, color, 2)
+                cv2.putText(canvas, f"{entry['score']}", (score_x, y), cv2.FONT_HERSHEY_SIMPLEX, font_scale, color, 2)
+                cv2.putText(canvas, f"{entry['game_duration']}s", (time_x, y), cv2.FONT_HERSHEY_SIMPLEX, font_scale, color, 2)
+                cv2.putText(canvas, date_str, (date_x, y), cv2.FONT_HERSHEY_SIMPLEX, font_scale * 0.8, color, 1)
         
         # Instructions
         self.draw_centered_text(canvas, "Press ESC to return to main menu", 
-                               self.canvas_height - 40, 0.6, (200, 200, 200), 1)
+                               self.canvas_height - 40, 0.6, self.GRAY, 1)
     
     def draw_game_over(self, canvas, final_score: int, game_duration: float):
         """Draw the game over screen"""
-        canvas.fill(30)
+        canvas.fill(self.BACKGROUND_COLOR)
         
-        self.draw_centered_text(canvas, "GAME OVER", 120, 1.5, (255, 0, 0), 3)
+        self.draw_centered_text(canvas, "GAME OVER", 120, 1.5, self.RED, 3)
         
         # Score display
-        self.draw_centered_text(canvas, f"Final Score: {final_score}", 200, 1.2, (0, 255, 255), 3)
-        self.draw_centered_text(canvas, f"Game Duration: {game_duration:.1f} seconds", 250, 0.8, (255, 255, 0), 2)
+        self.draw_centered_text(canvas, f"Final Score: {final_score}", 200, 1.2, self.CYAN, 3)
+        self.draw_centered_text(canvas, f"Game Duration: {game_duration:.1f} seconds", 250, 0.8, self.YELLOW, 2)
         
         # Check if it's a high score
         top_scores = self.leaderboard.get_top_scores(10)
         is_high_score = len(top_scores) < 10 or final_score > top_scores[-1]['score']
         
         if is_high_score and final_score > 0:
-            self.draw_centered_text(canvas, "NEW HIGH SCORE!", 300, 1.0, (255, 255, 0), 2)
+            self.draw_centered_text(canvas, "NEW HIGH SCORE!", 300, 1.0, self.YELLOW, 2)
             if self.current_player:
                 rank = self.leaderboard.get_player_rank(self.current_player)
                 if rank:
-                    self.draw_centered_text(canvas, f"You are rank #{rank}!", 330, 0.8, (0, 255, 0), 2)
+                    self.draw_centered_text(canvas, f"You are rank #{rank}!", 330, 0.8, self.GREEN, 2)
         
         # Menu options
         menu_items = ["Play Again", "Main Menu", "View Leaderboard"]
@@ -219,7 +265,7 @@ class MenuSystem:
         
         # Instructions
         self.draw_centered_text(canvas, "Use UP/DOWN arrows and ENTER to select", 
-                               self.canvas_height - 40, 0.6, (200, 200, 200), 1)
+                               self.canvas_height - 40, 0.6, self.GRAY, 1)
     
     def update_cursor_blink(self):
         """Update cursor blinking animation"""

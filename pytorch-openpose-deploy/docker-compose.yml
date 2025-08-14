@@ -26,12 +26,16 @@ services:
     ipc: host
     stdin_open: true
     tty: true
+    network_mode: host
     environment:
       - DISPLAY=${DISPLAY}
       - PYTHONUNBUFFERED=1
       - NVIDIA_VISIBLE_DEVICES=all
+      - XAUTHORITY=/root/.Xauthority
+      - QT_X11_NO_MITSHM=1
     volumes:
       - /tmp/.X11-unix:/tmp/.X11-unix:rw
+      - ${HOME}/.Xauthority:/root/.Xauthority:rw
       - .:/app
       - /dev:/dev
       - /usr/lib/x86_64-linux-gnu/libcuda.so.1:/usr/lib/x86_64-linux-gnu/libcuda.so.1
