@@ -1,5 +1,4 @@
 import cv2
-import copy
 import numpy as np
 import torch
 import time
@@ -44,6 +43,48 @@ DEBUG_MODE = cfg.DEBUG_MODE
 REDUCED_MODEL_PRECISION = cfg.REDUCED_MODEL_PRECISION
 DISPLAY_KEYPOINTS = cfg.DISPLAY_KEYPOINTS
 ENABLE_PALM_DETECTION = cfg.ENABLE_PALM_DETECTION
+
+# Game constants
+COUNTDOWN_DURATION = 3.0
+COUNTDOWN_SPAWN_HEIGHT = 50
+MIN_TRAJECTORY_POINTS = 5
+UPWARD_VELOCITY_THRESHOLD = -3.0
+SUCCESSFUL_VOLLEY_TIMEOUT = 2.0
+HIT_COOLDOWN_DURATION = 0.5
+AUTO_RESET_DURATION = 3.0
+VOLLEYBALL_SHOT_COOLDOWN = 1.0
+SHOT_MESSAGE_DURATION = 2.0
+
+# Volleyball shot detection thresholds
+DIG_DISTANCE_THRESHOLD = 150
+SET_HEIGHT_THRESHOLD = 100
+SPIKE_VELOCITY_THRESHOLD = 15
+
+# History lengths
+PALM_HISTORY_LENGTH = 5
+ARM_HISTORY_LENGTH = 3
+
+# Physics constants
+FIXED_TIME_STEP = 1/60.0
+MAX_VELOCITY = 15.0
+MAX_PHYSICS_STEPS = 3
+
+# Camera and display constants
+FPS_UPDATE_INTERVAL = 1.0
+
+# UI Color constants
+BLACK = (0, 0, 0)
+WHITE = (255, 255, 255)
+RED = (0, 0, 255)
+GREEN = (0, 255, 0)
+BLUE = (255, 0, 0)
+CYAN = (255, 255, 0)
+YELLOW = (0, 255, 255)
+MAGENTA = (255, 0, 255)
+ORANGE = (0, 150, 255)
+GRAY = (150, 150, 150)
+DARK_GRAY = (50, 50, 50)
+LIGHT_BLUE = (255, 200, 100)
 
 print(f"Starting ball physics demo with optimized settings...")
 if DEBUG_MODE:
@@ -138,8 +179,6 @@ ball_ground_start_time = 0
 # Countdown state variables
 countdown_active = True
 countdown_start_time = time.time()
-countdown_duration = 3.0  # 3 seconds countdown
-COUNTDOWN_SPAWN_HEIGHT = 50  # Distance from top of screen to spawn ball
 
 # Enhanced score tracking variables
 current_score = 0
@@ -150,40 +189,27 @@ last_hit_was_bounce = False  # Track if we should award a point
 ball_trajectory_history = []  # Track ball position over time
 last_successful_hit_time = 0
 hit_sequence_active = False
-min_trajectory_points = 5  # Minimum points to validate trajectory
-upward_velocity_threshold = -3.0  # Ball must move up after hit
-successful_volley_timeout = 2.0  # Time window for successful volley
 consecutive_hits = 0  # Track consecutive successful hits
 last_ground_contact_time = 0
 
 # Cooldown system to prevent multiple points per touch
 last_hit_time = 0
-hit_cooldown_duration = 0.5  # 500ms cooldown between hits
 
 # Auto-reset variables
-auto_reset_duration = 3.0  # Reset ball if on ground for 3 seconds
 ball_ground_start_time = 0
 
 # Volleyball shot detection variables
-VOLLEYBALL_SHOT_COOLDOWN = 1.0  # Prevent multiple detections of same shot
 last_volleyball_shot_time = 0
 shot_message = ""
 shot_message_time = 0
-SHOT_MESSAGE_DURATION = 2.0  # How long to show the shot message
 
-# Shot detection thresholds
-DIG_DISTANCE_THRESHOLD = 150  # Max distance between hands for dig shot
-SET_HEIGHT_THRESHOLD = 100  # Min height above head for set shot
-SPIKE_VELOCITY_THRESHOLD = 15  # Min velocity added for spike detection
 
 # Palm detection state
 palm_positions = []  # Array of palm positions with their sizes
 palm_history = []  # Track palm positions over time
-PALM_HISTORY_LENGTH = 5  # Number of frames to keep palm history
 
 # Time tracking for physics
 previous_time = time.time()
-fixed_time_step = 1/60.0  # Target 60 physics updates per second
 accumulated_time = 0.0
 
 # Pose detection tracking
@@ -191,7 +217,6 @@ frame_count = 0
 last_valid_keypoints = None
 
 # FPS calculation variables
-fps_update_interval = 1.0
 fps_last_update = time.time()
 fps_frame_count = 0
 current_fps = 0
@@ -324,7 +349,7 @@ def update_countdown():
         return None
     
     elapsed_time = time.time() - countdown_start_time
-    remaining_time = countdown_duration - elapsed_time
+    remaining_time = COUNTDOWN_DURATION - elapsed_time
     
     if remaining_time <= 0:
         # Countdown finished - activate ball
@@ -398,7 +423,7 @@ def check_wall_collision():
             time_since_hit = last_ground_contact_time - last_successful_hit_time
             
             if current_score > 0:
-                if time_since_hit > successful_volley_timeout:
+                if time_since_hit > SUCCESSFUL_VOLLEY_TIMEOUT:
                     print(f"Ball hit ground! Score reset from {current_score} to 0 (timeout)")
                     current_score = 0
                     consecutive_hits = 0
@@ -422,7 +447,7 @@ def check_wall_collision():
 
     # Cap velocity if collision occurred (optimized)
     if collision_happened:
-        max_velocity = 15.0  # Max velocity limit
+        max_velocity = MAX_VELOCITY
         velocity_mag_sq = np.dot(ball_velocity, ball_velocity)  # Squared magnitude (faster)
         if velocity_mag_sq > max_velocity * max_velocity:
             velocity_mag = np.sqrt(velocity_mag_sq)
@@ -461,13 +486,13 @@ def validate_successful_hit(hit_time):
     # Get trajectory points after the hit
     post_hit_points = [point for point in ball_trajectory_history if point['time'] > hit_time]
     
-    if len(post_hit_points) < min_trajectory_points:
+    if len(post_hit_points) < MIN_TRAJECTORY_POINTS:
         return False, "Not enough trajectory data"
     
     # Check if ball moved upward after hit (negative velocity = upward)
     initial_velocity = post_hit_points[0]['velocity'][1] if post_hit_points else 0
     
-    if initial_velocity > upward_velocity_threshold:
+    if initial_velocity > UPWARD_VELOCITY_THRESHOLD:
         return False, f"Ball didn't move up enough: {initial_velocity:.1f}"
     
     # Check if ball gained altitude within 0.5 seconds after hit
@@ -724,7 +749,7 @@ def check_palm_collision():
                 current_time = time.time()
                 
                 # Check cooldown to prevent multiple points per touch
-                if current_time - last_hit_time < hit_cooldown_duration:
+                if current_time - last_hit_time < HIT_COOLDOWN_DURATION:
                     return True  # Collision detected but no scoring
                 
                 last_hit_time = current_time
@@ -971,7 +996,6 @@ def check_arm_collision(candidate, subset):
     
     # Check all recent arm positions to detect fast movements (optimized)
     collision_threshold = BALL_RADIUS + ARM_COLLISION_PADDING
-    collision_threshold_sq = collision_threshold * collision_threshold
     
     for positions in last_arm_positions:
         for name, start, end in positions:
@@ -1037,7 +1061,7 @@ def check_arm_collision(candidate, subset):
                     
                     # Check cooldown to prevent multiple points per touch
                     current_time = time.time()
-                    if current_time - last_hit_time >= hit_cooldown_duration:
+                    if current_time - last_hit_time >= HIT_COOLDOWN_DURATION:
                         last_hit_time = current_time
                         
                         if last_hit_was_bounce and ball_active:
@@ -1145,7 +1169,7 @@ try:
         
         # FPS counter update
         fps_frame_count += 1
-        if current_time - fps_last_update > fps_update_interval:
+        if current_time - fps_last_update > FPS_UPDATE_INTERVAL:
             current_fps = fps_frame_count / (current_time - fps_last_update)
             fps_last_update = current_time
             fps_frame_count = 0
@@ -1184,7 +1208,7 @@ try:
         oriImg = cv2.flip(oriImg, 1)
         
         # Create canvas copy efficiently (optimized)
-        canvas = oriImg.copy()  # More efficient than copy.copy() for numpy arrays
+        canvas = oriImg.copy()
         
         # Check for new pose results (optimized with circular buffer)
         if new_pose_result and pose_results:
@@ -1212,8 +1236,7 @@ try:
         if menu.is_playing():
             # Run fixed timestep physics updates (optimized with max iterations)
             physics_update_count = 0
-            max_physics_steps = 3  # Prevent performance spikes
-            while accumulated_time >= fixed_time_step and physics_update_count < max_physics_steps:
+            while accumulated_time >= FIXED_TIME_STEP and physics_update_count < MAX_PHYSICS_STEPS:
                 physics_update_count += 1
                 physics_counter += 1
                 
@@ -1229,8 +1252,8 @@ try:
                     check_arm_collision(last_valid_keypoints[0], last_valid_keypoints[1])
                 
                 # Update physics with fixed time step
-                update_physics(fixed_time_step)
-                accumulated_time -= fixed_time_step
+                update_physics(FIXED_TIME_STEP)
+                accumulated_time -= FIXED_TIME_STEP
         else:
             # Reset accumulated time when not playing to prevent physics buildup
             accumulated_time = 0
@@ -1242,7 +1265,7 @@ try:
             
             # Check for auto-reset if ball has been on ground too long
             if ball_on_ground and ball_active and ball_ground_start_time > 0:
-                if time.time() - ball_ground_start_time > auto_reset_duration:
+                if time.time() - ball_ground_start_time > AUTO_RESET_DURATION:
                     # End game when ball stays on ground too long
                     print("Game over - ball stayed on ground too long!")
                     menu.show_game_over(current_score)
@@ -1416,7 +1439,7 @@ try:
         elif ball_active:
             if ball_on_ground and velocity_magnitude < 0.2:
                 if ball_ground_start_time > 0:
-                    time_remaining = auto_reset_duration - (time.time() - ball_ground_start_time)
+                    time_remaining = AUTO_RESET_DURATION - (time.time() - ball_ground_start_time)
                     if time_remaining > 0:
                         state_text = f"RESTING ({time_remaining:.1f}s)"
                         state_color = (100, 100, 255)  # Light red
