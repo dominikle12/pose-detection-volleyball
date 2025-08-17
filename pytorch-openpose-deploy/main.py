@@ -47,8 +47,6 @@ ENABLE_PALM_DETECTION = cfg.ENABLE_PALM_DETECTION
 # Game constants
 COUNTDOWN_DURATION = 3.0
 COUNTDOWN_SPAWN_HEIGHT = 50
-MIN_TRAJECTORY_POINTS = 5
-UPWARD_VELOCITY_THRESHOLD = -3.0
 SUCCESSFUL_VOLLEY_TIMEOUT = 2.0
 HIT_COOLDOWN_DURATION = 0.5
 AUTO_RESET_DURATION = 3.0
@@ -185,10 +183,7 @@ current_score = 0
 high_score = 0
 last_hit_was_bounce = False  # Track if we should award a point
 
-# New robust scoring system variables
-ball_trajectory_history = []  # Track ball position over time
-last_successful_hit_time = 0
-hit_sequence_active = False
+# Scoring system variables
 consecutive_hits = 0  # Track consecutive successful hits
 last_ground_contact_time = 0
 
@@ -289,8 +284,7 @@ def point_to_segment_distance(p, v, w):
 
 def reset_ball(center_x=None, center_y=None):
     """Reset the ball to the given position or screen center"""
-    global ball_pos, ball_velocity, ball_active, ball_on_ground, ball_ground_start_time, current_score
-    global ball_trajectory_history, consecutive_hits, last_successful_hit_time, last_ground_contact_time
+    global ball_pos, ball_velocity, ball_active, ball_on_ground, ball_ground_start_time, current_score, consecutive_hits, last_ground_contact_time, last_hit_time
     
     if center_x is None or center_y is None:
         center_x, center_y = CANVAS_WIDTH // 2, CANVAS_HEIGHT // 2
@@ -302,10 +296,8 @@ def reset_ball(center_x=None, center_y=None):
     ball_ground_start_time = 0 
     current_score = 0
     
-    # Reset enhanced scoring variables
-    ball_trajectory_history = []
+    # Reset scoring variables
     consecutive_hits = 0
-    last_successful_hit_time = 0
     last_ground_contact_time = 0
     last_hit_time = 0  # Reset cooldown
 
@@ -314,8 +306,7 @@ def reset_ball(center_x=None, center_y=None):
 
 def start_countdown_spawn(spawn_x=None):
     """Start countdown and spawn ball at top of screen"""
-    global ball_pos, ball_velocity, ball_active, ball_on_ground, countdown_active, countdown_start_time, ball_ground_start_time, current_score
-    global ball_trajectory_history, consecutive_hits, last_successful_hit_time, last_ground_contact_time
+    global ball_pos, ball_velocity, ball_active, ball_on_ground, countdown_active, countdown_start_time, ball_ground_start_time, current_score, consecutive_hits, last_ground_contact_time, last_hit_time
 
     if spawn_x is None:
         spawn_x = CANVAS_WIDTH // 2
@@ -328,10 +319,8 @@ def start_countdown_spawn(spawn_x=None):
     ball_ground_start_time = 0
     current_score = 0
     
-    # Reset enhanced scoring variables
-    ball_trajectory_history = []
+    # Reset scoring variables
     consecutive_hits = 0
-    last_successful_hit_time = 0
     last_hit_time = 0  # Reset cooldown
     last_ground_contact_time = 0
     
@@ -363,7 +352,7 @@ def update_countdown():
 
 def check_wall_collision():
     """Check and handle collisions with screen boundaries"""
-    global ball_pos, ball_velocity, ball_on_ground, ground_contact_time, ball_ground_start_time,  current_score, last_hit_was_bounce
+    global ball_pos, ball_velocity, ball_on_ground, ground_contact_time, ball_ground_start_time, current_score, last_hit_was_bounce, consecutive_hits, last_ground_contact_time
     collision_happened = False
     
     # Debug output
@@ -415,20 +404,13 @@ def check_wall_collision():
             ball_on_ground = True
             
             # Enhanced ground contact handling
-            global consecutive_hits, last_ground_contact_time, last_successful_hit_time
-            
             last_ground_contact_time = time.time()
             
-            # Only reset score if it's been a while since last successful hit
-            time_since_hit = last_ground_contact_time - last_successful_hit_time
-            
             if current_score > 0:
-                if time_since_hit > SUCCESSFUL_VOLLEY_TIMEOUT:
-                    print(f"Ball hit ground! Score reset from {current_score} to 0 (timeout)")
-                    current_score = 0
-                    consecutive_hits = 0
-                else:
-                    print(f"Ball bounced but keeping score ({time_since_hit:.1f}s since hit)")
+                # Reset score when ball hits ground for too long
+                print(f"Ball hit ground! Score reset from {current_score} to 0")
+                current_score = 0
+                consecutive_hits = 0
             
             last_hit_was_bounce = False
 
@@ -459,56 +441,6 @@ def check_wall_collision():
     
     return collision_happened
 
-def update_ball_trajectory():
-    """Track ball trajectory for scoring validation"""
-    global ball_trajectory_history, ball_pos, ball_velocity
-    
-    # Add current ball state to trajectory history
-    current_time = time.time()
-    ball_trajectory_history.append({
-        'time': current_time,
-        'position': ball_pos.copy(),
-        'velocity': ball_velocity.copy(),
-        'on_ground': ball_on_ground
-    })
-    
-    # Keep only recent trajectory points (last 2 seconds)
-    cutoff_time = current_time - 2.0
-    ball_trajectory_history = [point for point in ball_trajectory_history if point['time'] > cutoff_time]
-
-def validate_successful_hit(hit_time):
-    """
-    Validate if a hit was successful by checking ball trajectory after the hit.
-    A successful hit should result in upward ball movement.
-    """
-    global ball_trajectory_history
-    
-    # Get trajectory points after the hit
-    post_hit_points = [point for point in ball_trajectory_history if point['time'] > hit_time]
-    
-    if len(post_hit_points) < MIN_TRAJECTORY_POINTS:
-        return False, "Not enough trajectory data"
-    
-    # Check if ball moved upward after hit (negative velocity = upward)
-    initial_velocity = post_hit_points[0]['velocity'][1] if post_hit_points else 0
-    
-    if initial_velocity > UPWARD_VELOCITY_THRESHOLD:
-        return False, f"Ball didn't move up enough: {initial_velocity:.1f}"
-    
-    # Check if ball gained altitude within 0.5 seconds after hit
-    hit_position_y = post_hit_points[0]['position'][1]
-    max_altitude = hit_position_y
-    
-    for point in post_hit_points[:10]:  # Check first 10 points (~ 0.5 seconds)
-        if point['position'][1] < max_altitude:
-            max_altitude = point['position'][1]
-    
-    altitude_gain = hit_position_y - max_altitude
-    
-    if altitude_gain < 20:  # Minimum 20 pixels of upward movement
-        return False, f"Insufficient altitude gain: {altitude_gain:.1f}"
-    
-    return True, f"Valid hit: altitude gain {altitude_gain:.1f}, initial velocity {initial_velocity:.1f}"
 
 def update_physics(delta_time):
     """Update ball physics for one time step"""
@@ -516,9 +448,6 @@ def update_physics(delta_time):
     
     if not ball_active:
         return False
-    
-    # Update ball trajectory tracking
-    update_ball_trajectory()
     
     # Apply physics only if the ball is active
     if not ball_on_ground:
@@ -672,7 +601,7 @@ def check_palm_collision():
     Check for collisions between the ball and palm positions (optimized).
     Palm collisions should provide a more intuitive interaction than arm-based collisions.
     """
-    global ball_pos, ball_velocity, ball_active, ball_on_ground, current_score, high_score, last_hit_was_bounce, shot_message, shot_message_time, last_hit_time
+    global ball_pos, ball_velocity, ball_active, ball_on_ground, current_score, high_score, last_hit_was_bounce, shot_message, shot_message_time, last_hit_time, consecutive_hits
     
     if not ENABLE_PALM_DETECTION or not palm_history:
         return False
@@ -745,7 +674,7 @@ def check_palm_collision():
                 
                 ball_on_ground = False
 
-                # Enhanced scoring system with trajectory validation
+                # Enhanced scoring system with immediate validation
                 current_time = time.time()
                 
                 # Check cooldown to prevent multiple points per touch
@@ -757,62 +686,40 @@ def check_palm_collision():
                 # Detect volleyball shot type first
                 shot_name, bonus_points = detect_volleyball_shot(palm_positions, ball_pos, velocity_before, ball_velocity)
                 
-                # Store hit information for later validation
-                hit_info = {
-                    'time': current_time,
-                    'shot_name': shot_name,
-                    'bonus_points': bonus_points,
-                    'position': ball_pos.copy(),
-                    'velocity': ball_velocity.copy()
-                }
+                # Immediate validation based on velocity change (no threading)
+                velocity_magnitude_before = np.linalg.norm(velocity_before)
+                velocity_magnitude_after = np.linalg.norm(ball_velocity)
+                velocity_change = abs(velocity_magnitude_after - velocity_magnitude_before)
                 
-                # Schedule validation check after trajectory develops
-                def validate_and_score():
-                    nonlocal hit_info
-                    global current_score, high_score, shot_message, shot_message_time, consecutive_hits, last_successful_hit_time
+                # Simple immediate validation: check if ball is moving upward with sufficient force
+                is_valid_hit = (velocity_change > 2.0 and ball_velocity[1] < -1.0)  # Ball moving up with force
+                
+                if is_valid_hit:
+                    # Award points for successful hit
+                    points_to_add = 1 + bonus_points
+                    current_score += points_to_add
+                    consecutive_hits += 1
                     
-                    # Wait for trajectory to develop
-                    time.sleep(0.3)
+                    if current_score > high_score:
+                        high_score = current_score
                     
-                    # Validate if the hit was successful
-                    is_valid, validation_msg = validate_successful_hit(hit_info['time'])
+                    # Show shot message only for specific volleyball shots
+                    volleyball_shots = ["SPIKE!", "SET SHOT!", "DIG SHOT!", "BUMP PASS!"]
                     
-                    if DEBUG_MODE:
-                        print(f"Hit validation: {validation_msg}")
-                    
-                    if is_valid:
-                        # Award points for successful hit
-                        points_to_add = 1 + hit_info['bonus_points']
-                        current_score += points_to_add
-                        consecutive_hits += 1
-                        last_successful_hit_time = current_time
-                        
-                        if current_score > high_score:
-                            high_score = current_score
-                        
-                        # Show shot message only for specific volleyball shots
-                        volleyball_shots = ["SPIKE!", "SET SHOT!", "DIG SHOT!", "BUMP PASS!"]
-                        
-                        if hit_info['shot_name'] and hit_info['shot_name'] in volleyball_shots:
-                            if hit_info['bonus_points'] > 0:
-                                shot_message = f"{hit_info['shot_name']} +{hit_info['bonus_points']} bonus!"
-                            else:
-                                shot_message = hit_info['shot_name']
-                            shot_message_time = time.time()
-                            print(f"{hit_info['shot_name']} Score: {current_score} (High: {high_score}) Consecutive: {consecutive_hits}")
+                    if shot_name and shot_name in volleyball_shots:
+                        if bonus_points > 0:
+                            shot_message = f"{shot_name} +{bonus_points} bonus!"
                         else:
-                            # No visual message for basic hits, just console output
-                            print(f"Good Hit! Score: {current_score} (High: {high_score}) Consecutive: {consecutive_hits}")
+                            shot_message = shot_name
+                        shot_message_time = time.time()
+                        print(f"{shot_name} Score: {current_score} (High: {high_score}) Consecutive: {consecutive_hits}")
                     else:
-                        # Hit was not successful - no points awarded
-                        if DEBUG_MODE:
-                            print(f"Hit not awarded: {validation_msg}")
-                
-                # Run validation in a separate thread to avoid blocking
-                import threading
-                validation_thread = threading.Thread(target=validate_and_score)
-                validation_thread.daemon = True
-                validation_thread.start()
+                        # No visual message for basic hits, just console output
+                        print(f"Good Hit! Score: {current_score} (High: {high_score}) Consecutive: {consecutive_hits}")
+                else:
+                    # Hit was not successful - no points awarded
+                    if DEBUG_MODE:
+                        print(f"Hit not awarded: velocity_change={velocity_change:.1f}, upward_velocity={ball_velocity[1]:.1f}")
                 
                 last_hit_was_bounce = True
 
