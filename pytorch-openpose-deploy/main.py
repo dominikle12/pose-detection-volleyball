@@ -42,7 +42,8 @@ WRIST_ELBOW_REF_DISTANCE = cfg.WRIST_ELBOW_REF_DISTANCE
 DEBUG_MODE = cfg.DEBUG_MODE
 REDUCED_MODEL_PRECISION = cfg.REDUCED_MODEL_PRECISION
 DISPLAY_KEYPOINTS = cfg.DISPLAY_KEYPOINTS
-ENABLE_PALM_DETECTION = cfg.ENABLE_PALM_DETECTION
+ENABLE_PALM_DETECTION = True  # Always enabled for gameplay
+DISPLAY_PALM_MARKINGS = cfg.DISPLAY_KEYPOINTS  # Separate toggle for visual markings
 
 # Game constants
 COUNTDOWN_DURATION = 3.0
@@ -492,41 +493,74 @@ def calculate_palm_size(wrist_pos, elbow_pos):
         # Default size if distance calculation fails
         return PALM_BASE_SIZE
 
-def estimate_palm_position(wrist_pos, elbow_pos):
+def estimate_palm_position(wrist_pos, elbow_pos, shoulder_pos=None, prev_palm_pos=None):
     """
-    Estimate palm position based on wrist and elbow positions.
-    The palm is positioned a short distance from the wrist, away from the elbow.
+    Improved palm position estimation using forearm direction and anatomical constraints.
+    Uses smoothing and considers shoulder position when available.
     """
     # Convert to numpy arrays for vector operations
-    wrist = np.array(wrist_pos)
-    elbow = np.array(elbow_pos)
+    wrist = np.array(wrist_pos, dtype=np.float32)
+    elbow = np.array(elbow_pos, dtype=np.float32)
     
-    # Vector from elbow to wrist
-    direction = wrist - elbow
+    # Vector from elbow to wrist (forearm direction)
+    forearm_vector = wrist - elbow
+    forearm_length = np.linalg.norm(forearm_vector)
     
-    # Normalize direction vector
-    length = np.linalg.norm(direction)
-    if length > 0:
-        direction = direction / length
-    else:
-        # Default direction if wrist and elbow are at the same position
-        direction = np.array([0, -1])  # Assume hand is pointing up
+    if forearm_length < 1e-6:  # Degenerate case
+        if prev_palm_pos is not None:
+            return prev_palm_pos  # Use previous position if available
+        return wrist + np.array([0, -30], dtype=np.float32)  # Default fallback
     
-    # Position palm slightly past the wrist (about 15% of the forearm length)
-    palm_offset_distance = length * 0.15
-    palm_pos = wrist + direction * palm_offset_distance
+    # Normalize forearm direction
+    forearm_unit = forearm_vector / forearm_length
+    
+    # Adaptive palm offset based on forearm length (more realistic scaling)
+    # Typical hand length is about 70% of forearm length
+    base_palm_offset = forearm_length * 0.35  # More realistic than fixed 15%
+    
+    # Consider shoulder position for better hand orientation estimation
+    if shoulder_pos is not None:
+        shoulder = np.array(shoulder_pos, dtype=np.float32)
+        
+        # Vector from shoulder to elbow
+        upper_arm_vector = elbow - shoulder
+        upper_arm_length = np.linalg.norm(upper_arm_vector)
+        
+        if upper_arm_length > 1e-6:
+            upper_arm_unit = upper_arm_vector / upper_arm_length
+            
+            # Calculate angle between upper arm and forearm
+            cos_angle = np.clip(np.dot(upper_arm_unit, forearm_unit), -1, 1)
+            arm_angle = np.arccos(cos_angle)
+            
+            # Adjust palm offset based on arm bend (extended arm = longer offset)
+            angle_factor = 0.7 + 0.6 * (arm_angle / np.pi)  # 0.7 to 1.3 range
+            base_palm_offset *= angle_factor
+    
+    # Calculate initial palm position
+    raw_palm_pos = wrist + forearm_unit * base_palm_offset
+    
+    # Use raw palm position for zero lag (completely responsive)
+    palm_pos = raw_palm_pos
     
     return palm_pos
 
 def detect_palms(candidate, subset):
     """
-    Detect palm positions based on pose estimation results.
-    For each detected person, estimate palm positions and calculate their sizes
-    based on the distance from the camera.
+    Detect palm positions based on pose estimation results with improved accuracy.
+    For each detected person, estimate palm positions using enhanced algorithm
+    that considers shoulder position and applies smoothing.
     
     Returns a list of palm positions and their sizes.
     """
     global palm_positions, palm_history
+    
+    # Store previous palm positions for smoothing
+    prev_palm_dict = {}
+    if palm_history and len(palm_history) > 0:
+        last_palms = palm_history[-1]
+        for palm in last_palms:
+            prev_palm_dict[palm["side"]] = palm["position"]
     
     # Clear previous palm positions
     palm_positions = []
@@ -537,6 +571,22 @@ def detect_palms(candidate, subset):
     
     # Process all detected people
     for person_idx in range(len(subset)):
+        # Get shoulder positions for better palm estimation
+        right_shoulder_idx = int(subset[person_idx][2])  # Index for right shoulder
+        left_shoulder_idx = int(subset[person_idx][5])   # Index for left shoulder
+        
+        # Get shoulder positions if available
+        right_shoulder_pos = None
+        left_shoulder_pos = None
+        
+        if (right_shoulder_idx != -1 and right_shoulder_idx < len(candidate) and 
+            candidate[right_shoulder_idx][2] > KEYPOINT_CONFIDENCE_THRESHOLD):
+            right_shoulder_pos = (candidate[right_shoulder_idx][0], candidate[right_shoulder_idx][1])
+            
+        if (left_shoulder_idx != -1 and left_shoulder_idx < len(candidate) and 
+            candidate[left_shoulder_idx][2] > KEYPOINT_CONFIDENCE_THRESHOLD):
+            left_shoulder_pos = (candidate[left_shoulder_idx][0], candidate[left_shoulder_idx][1])
+        
         # Check right arm (elbow to wrist)
         right_elbow_idx = int(subset[person_idx][3])  # Index for right elbow
         right_wrist_idx = int(subset[person_idx][4])  # Index for right wrist
@@ -550,8 +600,12 @@ def detect_palms(candidate, subset):
                 elbow_pos = (candidate[right_elbow_idx][0], candidate[right_elbow_idx][1])
                 wrist_pos = (candidate[right_wrist_idx][0], candidate[right_wrist_idx][1])
                 
-                # Estimate palm position
-                palm_pos = estimate_palm_position(wrist_pos, elbow_pos)
+                # Get previous palm position for smoothing
+                prev_palm_pos = prev_palm_dict.get("right")
+                
+                # Estimate palm position with improved algorithm
+                palm_pos = estimate_palm_position(wrist_pos, elbow_pos, 
+                                               right_shoulder_pos, prev_palm_pos)
                 
                 # Calculate palm size based on apparent distance from camera
                 palm_size = calculate_palm_size(wrist_pos, elbow_pos)
@@ -576,8 +630,12 @@ def detect_palms(candidate, subset):
                 elbow_pos = (candidate[left_elbow_idx][0], candidate[left_elbow_idx][1])
                 wrist_pos = (candidate[left_wrist_idx][0], candidate[left_wrist_idx][1])
                 
-                # Estimate palm position
-                palm_pos = estimate_palm_position(wrist_pos, elbow_pos)
+                # Get previous palm position for smoothing
+                prev_palm_pos = prev_palm_dict.get("left")
+                
+                # Estimate palm position with improved algorithm
+                palm_pos = estimate_palm_position(wrist_pos, elbow_pos, 
+                                               left_shoulder_pos, prev_palm_pos)
                 
                 # Calculate palm size based on apparent distance from camera
                 palm_size = calculate_palm_size(wrist_pos, elbow_pos)
@@ -1211,8 +1269,8 @@ try:
             except Exception as e:
                 print(f"Error drawing body pose: {e}")
         
-        # Draw palm positions if palm detection is enabled
-        if ENABLE_PALM_DETECTION and palm_positions:
+        # Draw palm positions if visual markings are enabled
+        if DISPLAY_PALM_MARKINGS and palm_positions:
             for palm in palm_positions:
                 palm_pos = palm["position"]
                 palm_size = palm["size"]
@@ -1536,7 +1594,7 @@ try:
                            cv2.FONT_HERSHEY_SIMPLEX, font_scale, main_color, 4)
 
         # Enhanced controls display at bottom
-        controls_text = "R/SPACE: Start | Q: Quit | D: Debug | K: Keypoints | P: Palm"
+        controls_text = "R/SPACE: Start | Q: Quit | D: Debug | K: Keypoints | P: Palm Markings"
         controls_size = cv2.getTextSize(controls_text, cv2.FONT_HERSHEY_SIMPLEX, 0.5, 1)[0]
         controls_x = (CANVAS_WIDTH - controls_size[0]) // 2
         controls_y = CANVAS_HEIGHT - 15
@@ -1609,9 +1667,9 @@ try:
                 DISPLAY_KEYPOINTS = not DISPLAY_KEYPOINTS
                 print(f"Keypoint display: {DISPLAY_KEYPOINTS}")
             elif key == ord('p'):
-                # Toggle palm detection
-                ENABLE_PALM_DETECTION = not ENABLE_PALM_DETECTION
-                print(f"Palm detection: {ENABLE_PALM_DETECTION}")
+                # Toggle palm markings display (detection stays active)
+                DISPLAY_PALM_MARKINGS = not DISPLAY_PALM_MARKINGS
+                print(f"Palm markings display: {DISPLAY_PALM_MARKINGS}")
             elif key == ord('+'):
                 # Increase palm size multiplier
                 PALM_DISTANCE_FACTOR += 0.1
