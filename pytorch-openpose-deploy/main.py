@@ -174,7 +174,13 @@ floor_y = CANVAS_HEIGHT - 1  # Floor at bottom of screen
 ball_active = False
 ball_on_ground = False
 ground_contact_time = 0
-ball_ground_start_time = 0  
+ball_ground_start_time = 0
+
+# Ball trail effect
+ball_trail = deque(maxlen=15)  # Store last 15 positions
+
+# Particle effects for hits
+hit_particles = []  
 # Countdown state variables
 countdown_active = True
 countdown_start_time = time.time()
@@ -285,7 +291,7 @@ def point_to_segment_distance(p, v, w):
 
 def reset_ball(center_x=None, center_y=None):
     """Reset the ball to the given position or screen center"""
-    global ball_pos, ball_velocity, ball_active, ball_on_ground, ball_ground_start_time, current_score, consecutive_hits, last_ground_contact_time, last_hit_time
+    global ball_pos, ball_velocity, ball_active, ball_on_ground, ball_ground_start_time, current_score, consecutive_hits, last_ground_contact_time, last_hit_time, ball_trail, hit_particles
     
     if center_x is None or center_y is None:
         center_x, center_y = CANVAS_WIDTH // 2, CANVAS_HEIGHT // 2
@@ -301,6 +307,10 @@ def reset_ball(center_x=None, center_y=None):
     consecutive_hits = 0
     last_ground_contact_time = 0
     last_hit_time = 0  # Reset cooldown
+    
+    # Clear visual effects
+    ball_trail.clear()
+    hit_particles.clear()
 
     if DEBUG_MODE:
         print(f"Ball reset to position: ({ball_pos[0]}, {ball_pos[1]})")
@@ -443,12 +453,65 @@ def check_wall_collision():
     return collision_happened
 
 
+class Particle:
+    """Simple particle for hit effects"""
+    def __init__(self, x, y, vx, vy, color, life=1.0):
+        self.x = x
+        self.y = y
+        self.vx = vx
+        self.vy = vy
+        self.color = color
+        self.life = life
+        self.max_life = life
+        
+    def update(self, delta_time):
+        self.x += self.vx * delta_time * 60
+        self.y += self.vy * delta_time * 60
+        self.vy += 0.3  # Small gravity
+        self.vx *= 0.99  # Air resistance
+        self.life -= delta_time * 2
+        return self.life > 0
+
+def create_hit_particles(x, y, velocity, color=(255, 255, 100)):
+    """Create particles at hit location"""
+    global hit_particles
+    
+    # Create 8-12 particles radiating outward
+    import random
+    num_particles = random.randint(8, 12)
+    
+    for _ in range(num_particles):
+        angle = random.uniform(0, 2 * np.pi)
+        speed = random.uniform(3, 8)
+        
+        # Add some velocity influence from ball
+        vel_influence = 0.3
+        px_vel = np.cos(angle) * speed + velocity[0] * vel_influence
+        py_vel = np.sin(angle) * speed + velocity[1] * vel_influence
+        
+        # Vary particle colors
+        particle_color = (
+            min(255, color[0] + random.randint(-30, 30)),
+            min(255, color[1] + random.randint(-30, 30)),
+            min(255, color[2] + random.randint(-30, 30))
+        )
+        
+        hit_particles.append(Particle(x, y, px_vel, py_vel, particle_color, random.uniform(0.5, 1.2)))
+
+def update_particles(delta_time):
+    """Update all particles and remove dead ones"""
+    global hit_particles
+    hit_particles = [p for p in hit_particles if p.update(delta_time)]
+
 def update_physics(delta_time):
-    """Update ball physics for one time step"""
-    global ball_pos, ball_velocity, ball_active, ball_on_ground
+    """Update ball physics with improved mechanics"""
+    global ball_pos, ball_velocity, ball_active, ball_on_ground, ball_trail
     
     if not ball_active:
         return False
+    
+    # Add current position to trail
+    ball_trail.append((int(ball_pos[0]), int(ball_pos[1])))
     
     # Apply physics only if the ball is active
     if not ball_on_ground:
@@ -727,6 +790,10 @@ def check_palm_collision():
                 # Apply force in direction away from palm
                 ball_velocity += palm_to_ball_vector * palm_force
                 
+                # Create hit particles
+                particle_color = (0, 255, 150) if palm['side'] == 'right' else (255, 0, 255)
+                create_hit_particles(ball_pos[0], ball_pos[1], ball_velocity, particle_color)
+                
                 # Move ball slightly away from palm to prevent multiple collisions
                 ball_pos += palm_to_ball_vector * 5
                 
@@ -770,10 +837,9 @@ def check_palm_collision():
                         else:
                             shot_message = shot_name
                         shot_message_time = time.time()
-                        print(f"{shot_name} Score: {current_score} (High: {high_score}) Consecutive: {consecutive_hits}")
+                        print(f"{shot_name} Score: {current_score} (High: {high_score}) Hits: {consecutive_hits}")
                     else:
-                        # No visual message for basic hits, just console output
-                        print(f"Good Hit! Score: {current_score} (High: {high_score}) Consecutive: {consecutive_hits}")
+                        print(f"Good Hit! Score: {current_score} (High: {high_score}) Hits: {consecutive_hits}")
                 else:
                     # Hit was not successful - no points awarded
                     if DEBUG_MODE:
@@ -1219,6 +1285,9 @@ try:
                 # Update physics with fixed time step
                 update_physics(FIXED_TIME_STEP)
                 accumulated_time -= FIXED_TIME_STEP
+            
+            # Update particles
+            update_particles(delta_time)
         else:
             # Reset accumulated time when not playing to prevent physics buildup
             accumulated_time = 0
@@ -1307,6 +1376,16 @@ try:
             # Draw floor line at bottom of screen
             cv2.line(canvas, (0, floor_y), (CANVAS_WIDTH, floor_y), (0, 255, 255), 1)
             
+            # Draw ball trail effect
+            if len(ball_trail) > 1:
+                for i in range(len(ball_trail) - 1):
+                    alpha = i / len(ball_trail)  # Fade out older trail points
+                    trail_color = (int(100 * alpha), int(150 * alpha), int(255 * alpha))
+                    thickness = max(1, int(7 * alpha))
+                    
+                    if i < len(ball_trail) - 1:
+                        cv2.line(canvas, ball_trail[i], ball_trail[i + 1], trail_color, thickness)
+            
             # Draw ball with a dynamic color based on velocity
         velocity_magnitude = np.linalg.norm(ball_velocity)
         color_intensity = min(255, int(velocity_magnitude * 15))
@@ -1319,10 +1398,17 @@ try:
                 ball_color = (0, color_intensity, 255 - color_intensity)  # Dynamic color
         else:
             ball_color = (0, 0, 255)  # Red for inactive ball
-            
-        # Draw ball position
+        
+        # Draw ball
         ball_center = (int(ball_pos[0]), int(ball_pos[1]))
         cv2.circle(canvas, ball_center, BALL_RADIUS, ball_color, -1)
+        
+        # Draw hit particles
+        for particle in hit_particles:
+            alpha = particle.life / particle.max_life
+            color = tuple(int(c * alpha) for c in particle.color)
+            size = max(1, int(3 * alpha))
+            cv2.circle(canvas, (int(particle.x), int(particle.y)), size, color, -1)
         
         # Draw collision radius for debugging
         if DEBUG_MODE:
