@@ -556,10 +556,10 @@ def calculate_palm_size(wrist_pos, elbow_pos):
         # Default size if distance calculation fails
         return PALM_BASE_SIZE
 
-def estimate_palm_position(wrist_pos, elbow_pos, shoulder_pos=None, prev_palm_pos=None):
+def estimate_hand_segment(wrist_pos, elbow_pos, shoulder_pos=None):
     """
-    Improved palm position estimation using forearm direction and anatomical constraints.
-    Uses smoothing and considers shoulder position when available.
+    Estimate hand segment from wrist to fingertips for line-based collision detection.
+    Returns both wrist position and fingertip position.
     """
     # Convert to numpy arrays for vector operations
     wrist = np.array(wrist_pos, dtype=np.float32)
@@ -570,16 +570,14 @@ def estimate_palm_position(wrist_pos, elbow_pos, shoulder_pos=None, prev_palm_po
     forearm_length = np.linalg.norm(forearm_vector)
     
     if forearm_length < 1e-6:  # Degenerate case
-        if prev_palm_pos is not None:
-            return prev_palm_pos  # Use previous position if available
-        return wrist + np.array([0, -30], dtype=np.float32)  # Default fallback
+        return wrist, wrist + np.array([0, -40], dtype=np.float32)  # Default fallback
     
     # Normalize forearm direction
     forearm_unit = forearm_vector / forearm_length
     
-    # Adaptive palm offset based on forearm length (more realistic scaling)
+    # Hand length estimation based on forearm length
     # Typical hand length is about 70% of forearm length
-    base_palm_offset = forearm_length * 0.35  # More realistic than fixed 15%
+    base_hand_length = forearm_length * 0.7
     
     # Consider shoulder position for better hand orientation estimation
     if shoulder_pos is not None:
@@ -596,34 +594,23 @@ def estimate_palm_position(wrist_pos, elbow_pos, shoulder_pos=None, prev_palm_po
             cos_angle = np.clip(np.dot(upper_arm_unit, forearm_unit), -1, 1)
             arm_angle = np.arccos(cos_angle)
             
-            # Adjust palm offset based on arm bend (extended arm = longer offset)
-            angle_factor = 0.7 + 0.6 * (arm_angle / np.pi)  # 0.7 to 1.3 range
-            base_palm_offset *= angle_factor
+            # Adjust hand length based on arm bend (extended arm = longer reach)
+            angle_factor = 0.8 + 0.4 * (arm_angle / np.pi)  # 0.8 to 1.2 range
+            base_hand_length *= angle_factor
     
-    # Calculate initial palm position
-    raw_palm_pos = wrist + forearm_unit * base_palm_offset
+    # Calculate fingertip position
+    fingertip_pos = wrist + forearm_unit * base_hand_length
     
-    # Use raw palm position for zero lag (completely responsive)
-    palm_pos = raw_palm_pos
-    
-    return palm_pos
+    return wrist, fingertip_pos
 
-def detect_palms(candidate, subset):
+def detect_hands(candidate, subset):
     """
-    Detect palm positions based on pose estimation results with improved accuracy.
-    For each detected person, estimate palm positions using enhanced algorithm
-    that considers shoulder position and applies smoothing.
+    Detect hand segments (wrist to fingertips) for line-based collision detection.
+    For each detected person, estimate hand segments using enhanced algorithm.
     
-    Returns a list of palm positions and their sizes.
+    Returns a list of hand segments with their properties.
     """
     global palm_positions, palm_history
-    
-    # Store previous palm positions for smoothing
-    prev_palm_dict = {}
-    if palm_history and len(palm_history) > 0:
-        last_palms = palm_history[-1]
-        for palm in last_palms:
-            prev_palm_dict[palm["side"]] = palm["position"]
     
     # Clear previous palm positions
     palm_positions = []
@@ -634,7 +621,7 @@ def detect_palms(candidate, subset):
     
     # Process all detected people
     for person_idx in range(len(subset)):
-        # Get shoulder positions for better palm estimation
+        # Get shoulder positions for better hand estimation
         right_shoulder_idx = int(subset[person_idx][2])  # Index for right shoulder
         left_shoulder_idx = int(subset[person_idx][5])   # Index for left shoulder
         
@@ -663,20 +650,17 @@ def detect_palms(candidate, subset):
                 elbow_pos = (candidate[right_elbow_idx][0], candidate[right_elbow_idx][1])
                 wrist_pos = (candidate[right_wrist_idx][0], candidate[right_wrist_idx][1])
                 
-                # Get previous palm position for smoothing
-                prev_palm_pos = prev_palm_dict.get("right")
+                # Estimate hand segment (wrist to fingertips)
+                wrist_pos_calc, fingertip_pos = estimate_hand_segment(wrist_pos, elbow_pos, right_shoulder_pos)
                 
-                # Estimate palm position with improved algorithm
-                palm_pos = estimate_palm_position(wrist_pos, elbow_pos, 
-                                               right_shoulder_pos, prev_palm_pos)
+                # Calculate collision radius based on apparent distance from camera
+                collision_radius = calculate_palm_size(wrist_pos, elbow_pos) * 0.5  # Thinner for line collision
                 
-                # Calculate palm size based on apparent distance from camera
-                palm_size = calculate_palm_size(wrist_pos, elbow_pos)
-                
-                # Add to palm positions
+                # Add to hand segments
                 palm_positions.append({
-                    "position": palm_pos,
-                    "size": palm_size,
+                    "wrist": wrist_pos_calc,
+                    "fingertips": fingertip_pos,
+                    "radius": collision_radius,
                     "side": "right"
                 })
         
@@ -693,24 +677,21 @@ def detect_palms(candidate, subset):
                 elbow_pos = (candidate[left_elbow_idx][0], candidate[left_elbow_idx][1])
                 wrist_pos = (candidate[left_wrist_idx][0], candidate[left_wrist_idx][1])
                 
-                # Get previous palm position for smoothing
-                prev_palm_pos = prev_palm_dict.get("left")
+                # Estimate hand segment (wrist to fingertips)
+                wrist_pos_calc, fingertip_pos = estimate_hand_segment(wrist_pos, elbow_pos, left_shoulder_pos)
                 
-                # Estimate palm position with improved algorithm
-                palm_pos = estimate_palm_position(wrist_pos, elbow_pos, 
-                                               left_shoulder_pos, prev_palm_pos)
+                # Calculate collision radius based on apparent distance from camera
+                collision_radius = calculate_palm_size(wrist_pos, elbow_pos) * 0.5  # Thinner for line collision
                 
-                # Calculate palm size based on apparent distance from camera
-                palm_size = calculate_palm_size(wrist_pos, elbow_pos)
-                
-                # Add to palm positions
+                # Add to hand segments
                 palm_positions.append({
-                    "position": palm_pos,
-                    "size": palm_size,
+                    "wrist": wrist_pos_calc,
+                    "fingertips": fingertip_pos,
+                    "radius": collision_radius,
                     "side": "left"
                 })
     
-    # Add current palm positions to history
+    # Add current hand segments to history
     if palm_positions:
         palm_history.append(palm_positions)
         # Maintain history length
@@ -719,8 +700,8 @@ def detect_palms(candidate, subset):
 
 def check_palm_collision():
     """
-    Check for collisions between the ball and palm positions (optimized).
-    Palm collisions should provide a more intuitive interaction than arm-based collisions.
+    Check for collisions between the ball and hand segments (line-based collision).
+    Uses line segment collision detection for more realistic hand interaction.
     """
     global ball_pos, ball_velocity, ball_active, ball_on_ground, current_score, high_score, last_hit_was_bounce, shot_message, shot_message_time, last_hit_time, consecutive_hits
     
@@ -729,73 +710,77 @@ def check_palm_collision():
     
     collision_happened = False
     
-    # Check all recent palm positions (optimized with early exit and squared distances)
+    # Check all recent hand segments
     for positions in palm_history:
-        for palm in positions:
-            # Get palm position and size
-            palm_pos = np.array(palm["position"], dtype=np.float32)
-            palm_size = palm["size"]
+        for hand in positions:
+            # Get hand segment endpoints
+            wrist_pos = np.array(hand["wrist"], dtype=np.float32)
+            fingertip_pos = np.array(hand["fingertips"], dtype=np.float32)
+            collision_radius = hand["radius"]
             
-            # Optimized: Use squared distance first (avoids sqrt)
-            collision_threshold = BALL_RADIUS + palm_size
-            collision_threshold_sq = collision_threshold * collision_threshold
+            # Use line segment collision detection
+            collision_threshold = BALL_RADIUS + collision_radius
             
-            # Calculate squared distance from ball to palm
-            diff = ball_pos - palm_pos
-            distance_sq = np.dot(diff, diff)
-            
-            # Early exit if too far
-            if distance_sq >= collision_threshold_sq:
-                continue
-                
-            # Only calculate actual distance when collision is likely
-            distance = np.sqrt(distance_sq)
+            # Calculate distance from ball to hand segment line
+            distance, closest_point = point_to_segment_distance(ball_pos, wrist_pos, fingertip_pos)
             
             if DEBUG_MODE:
-                print(f"Distance to {palm['side']} palm: {distance:.1f}, threshold: {collision_threshold}")
+                print(f"Distance to {hand['side']} hand segment: {distance:.1f}, threshold: {collision_threshold}")
             
             if distance < collision_threshold:
                 # Activate the ball if it's not already active
                 if not ball_active:
-                    print(f"Ball activated by {palm['side']} palm hit!")
+                    print(f"Ball activated by {hand['side']} hand hit!")
                     ball_active = True
                 
-                # Vector from palm to ball
-                palm_to_ball_vector = ball_pos - palm_pos
-                palm_to_ball_length = np.linalg.norm(palm_to_ball_vector)
+                # Vector from closest point on hand to ball
+                hand_to_ball_vector = ball_pos - closest_point
+                hand_to_ball_length = np.linalg.norm(hand_to_ball_vector)
                 
-                if palm_to_ball_length > 0:
-                    palm_to_ball_vector = palm_to_ball_vector / palm_to_ball_length
+                if hand_to_ball_length > 0:
+                    hand_to_ball_vector = hand_to_ball_vector / hand_to_ball_length
                 else:
                     # Default direction if they're at the exact same point
-                    palm_to_ball_vector = np.array([0, -1])
+                    hand_to_ball_vector = np.array([0, -1])
                 
-                # Calculate reflection - simulating a bounce off the palm
-                # First, calculate the normal vector to the palm surface
-                # (assuming palm normal is the direction from palm to ball)
-                normal_vector = palm_to_ball_vector
+                # Calculate hand segment direction for more realistic physics
+                hand_segment_vector = fingertip_pos - wrist_pos
+                hand_segment_length = np.linalg.norm(hand_segment_vector)
+                
+                if hand_segment_length > 0:
+                    hand_segment_unit = hand_segment_vector / hand_segment_length
+                    # Normal to hand segment (perpendicular)
+                    hand_normal = np.array([-hand_segment_unit[1], hand_segment_unit[0]])
+                else:
+                    hand_normal = hand_to_ball_vector
+                
+                # Use the normal that points towards the ball
+                if np.dot(hand_normal, hand_to_ball_vector) < 0:
+                    hand_normal = -hand_normal
                 
                 # Calculate reflection vector
-                dot_product = np.dot(ball_velocity, normal_vector)
-                reflection = ball_velocity - 2 * dot_product * normal_vector
+                dot_product = np.dot(ball_velocity, hand_normal)
+                reflection = ball_velocity - 2 * dot_product * hand_normal
                 
                 velocity_before = ball_velocity.copy()
 
                 # Apply reflection with elasticity
                 ball_velocity = reflection * ELASTICITY
                 
-                # Add a hit force in the direction away from the palm
-                palm_force = 10.0  # Stronger force for palm hits
+                # Add a hit force in the direction away from the hand
+                hand_force = 10.0  # Stronger force for hand hits
                 
-                # Apply force in direction away from palm
-                ball_velocity += palm_to_ball_vector * palm_force
+                # Apply force in direction away from hand (combination of normal and hand-to-ball)
+                force_direction = (hand_normal + hand_to_ball_vector) * 0.5
+                force_direction = force_direction / np.linalg.norm(force_direction)
+                ball_velocity += force_direction * hand_force
                 
                 # Create hit particles
-                particle_color = (0, 255, 150) if palm['side'] == 'right' else (255, 0, 255)
+                particle_color = (0, 255, 150) if hand['side'] == 'right' else (255, 0, 255)
                 create_hit_particles(ball_pos[0], ball_pos[1], ball_velocity, particle_color)
                 
-                # Move ball slightly away from palm to prevent multiple collisions
-                ball_pos += palm_to_ball_vector * 5
+                # Move ball slightly away from hand to prevent multiple collisions
+                ball_pos += hand_to_ball_vector * 5
                 
                 ball_on_ground = False
 
@@ -849,7 +834,7 @@ def check_palm_collision():
 
                 # Log collision for debugging
                 if DEBUG_MODE:
-                    print(f"Collision with {palm['side']} palm at position {ball_pos[0]:.1f}, {ball_pos[1]:.1f}")
+                    print(f"Collision with {hand['side']} palm at position {ball_pos[0]:.1f}, {ball_pos[1]:.1f}")
                     print(f"New velocity: {ball_velocity[0]:.1f}, {ball_velocity[1]:.1f}")
                 
                 collision_happened = True
@@ -860,9 +845,9 @@ def check_palm_collision():
     
     return collision_happened
 
-def detect_volleyball_shot(palm_positions, ball_pos, velocity_before, velocity_after):
+def detect_volleyball_shot(hand_positions, ball_pos, velocity_before, velocity_after):
     """
-    Enhanced volleyball shot detection with better validation
+    Enhanced volleyball shot detection with better validation for hand segments
     Returns: (shot_name, bonus_points) or (None, 0)
     """
     global last_volleyball_shot_time
@@ -884,65 +869,66 @@ def detect_volleyball_shot(palm_positions, ball_pos, velocity_before, velocity_a
         return None, 0
     
     # Single hand shots (easier to detect)
-    if len(palm_positions) == 1:
-        palm = palm_positions[0]
-        palm_pos = np.array(palm["position"])
+    if len(hand_positions) == 1:
+        hand = hand_positions[0]
+        # Use fingertip position as reference point for shot detection
+        hand_pos = np.array(hand["fingertips"])
         
         # SPIKE: High velocity, downward angle, hand above ball
         if (velocity_magnitude_after > 8.0 and 
-            palm_pos[1] < ball_pos[1] - 30 and  # Hand well above ball
+            hand_pos[1] < ball_pos[1] - 30 and  # Hand well above ball
             velocity_after[1] > -20):  # Strong upward component
             last_volleyball_shot_time = time.time()
             return "SPIKE!", 5
         
         # OVERHEAD HIT: Medium velocity, hand above ball
         elif (velocity_magnitude_after > 5.0 and 
-              palm_pos[1] < ball_pos[1] - 20):
+              hand_pos[1] < ball_pos[1] - 20):
             last_volleyball_shot_time = time.time()
             return "OVERHEAD!", 3
         
         # UNDERHAND HIT: Hand below ball
-        elif palm_pos[1] > ball_pos[1] + 20:
+        elif hand_pos[1] > ball_pos[1] + 20:
             last_volleyball_shot_time = time.time()
             return "UNDERHAND!", 2
     
     # Two-handed shots
-    elif len(palm_positions) >= 2:
-        left_palm = None
-        right_palm = None
+    elif len(hand_positions) >= 2:
+        left_hand = None
+        right_hand = None
         
-        for palm in palm_positions:
-            if palm["side"] == "left":
-                left_palm = palm
-            elif palm["side"] == "right":
-                right_palm = palm
+        for hand in hand_positions:
+            if hand["side"] == "left":
+                left_hand = hand
+            elif hand["side"] == "right":
+                right_hand = hand
         
-        if left_palm and right_palm:
-            left_pos = np.array(left_palm["position"])
-            right_pos = np.array(right_palm["position"])
+        if left_hand and right_hand:
+            left_pos = np.array(left_hand["fingertips"])
+            right_pos = np.array(right_hand["fingertips"])
             
-            # Calculate distance between palms
-            palm_distance = np.linalg.norm(left_pos - right_pos)
-            avg_palm_pos = (left_pos + right_pos) / 2
+            # Calculate distance between hands
+            hand_distance = np.linalg.norm(left_pos - right_pos)
+            avg_hand_pos = (left_pos + right_pos) / 2
             
             # SET SHOT: Both hands above ball, close together, gentle velocity
-            if (palm_distance < 100 and 
-                avg_palm_pos[1] < ball_pos[1] - 40 and  # Hands above ball
+            if (hand_distance < 100 and 
+                avg_hand_pos[1] < ball_pos[1] - 40 and  # Hands above ball
                 velocity_magnitude_after < 12.0 and     # Gentle hit
                 velocity_after[1] < -3.0):              # Good upward component
                 last_volleyball_shot_time = time.time()
                 return "SET SHOT!", 4
             
             # DIG SHOT: Hands close together, below ball, strong upward velocity
-            elif (palm_distance < 120 and 
-                  avg_palm_pos[1] > ball_pos[1] + 10 and  # Hands below ball
+            elif (hand_distance < 120 and 
+                  avg_hand_pos[1] > ball_pos[1] + 10 and  # Hands below ball
                   velocity_after[1] < -5.0):               # Strong upward velocity
                 last_volleyball_shot_time = time.time()
                 return "DIG SHOT!", 4
             
             # BUMP PASS: Hands moderately close, at ball level
-            elif (palm_distance < 150 and 
-                  abs(avg_palm_pos[1] - ball_pos[1]) < 40 and
+            elif (hand_distance < 150 and 
+                  abs(avg_hand_pos[1] - ball_pos[1]) < 40 and
                   velocity_after[1] < -3.0):
                 last_volleyball_shot_time = time.time()
                 return "BUMP PASS!", 3
@@ -1245,9 +1231,9 @@ try:
         if new_pose_result and pose_results:
             pose_result = pose_results[-1]  # Get latest result from circular buffer
             last_valid_keypoints = pose_result
-            # Update palm positions based on the new pose
+            # Update hand segments based on the new pose
             if ENABLE_PALM_DETECTION:
-                detect_palms(last_valid_keypoints[0], last_valid_keypoints[1])
+                detect_hands(last_valid_keypoints[0], last_valid_keypoints[1])
             new_pose_result = False
         
         # Process pose detection on a schedule
@@ -1338,38 +1324,46 @@ try:
             except Exception as e:
                 print(f"Error drawing body pose: {e}")
         
-        # Draw palm positions if visual markings are enabled
+        # Draw hand segments if visual markings are enabled
         if DISPLAY_PALM_MARKINGS and palm_positions:
-            for palm in palm_positions:
-                palm_pos = palm["position"]
-                palm_size = palm["size"]
-                palm_side = palm["side"]
+            for hand in palm_positions:
+                wrist_pos = hand["wrist"]
+                fingertip_pos = hand["fingertips"]
+                radius = hand["radius"]
+                hand_side = hand["side"]
                 
-                # Draw palm circle with size based on distance
-                if palm_side == "right":
-                    palm_color = (0, 255, 0)  # Green for right palm
+                # Choose color based on hand side
+                if hand_side == "right":
+                    hand_color = (0, 255, 0)  # Green for right hand
                 else:
-                    palm_color = (255, 0, 255)  # Magenta for left palm
+                    hand_color = (255, 0, 255)  # Magenta for left hand
+                
+                # Draw hand segment line (wrist to fingertips)
+                cv2.line(canvas, 
+                        (int(wrist_pos[0]), int(wrist_pos[1])), 
+                        (int(fingertip_pos[0]), int(fingertip_pos[1])), 
+                        hand_color, 
+                        max(2, int(radius * 0.5)))  # Line thickness based on radius
+                
+                # Draw wrist and fingertip markers
+                cv2.circle(canvas, 
+                          (int(wrist_pos[0]), int(wrist_pos[1])), 
+                          6, 
+                          hand_color, 
+                          -1)  # Filled circle at wrist
                 
                 cv2.circle(canvas, 
-                          (int(palm_pos[0]), int(palm_pos[1])), 
-                          int(palm_size), 
-                          palm_color, 
-                          2)  # Draw as outline
+                          (int(fingertip_pos[0]), int(fingertip_pos[1])), 
+                          4, 
+                          hand_color, 
+                          -1)  # Smaller filled circle at fingertips
                 
-                # Draw a small filled circle at palm center for visibility
-                cv2.circle(canvas, 
-                          (int(palm_pos[0]), int(palm_pos[1])), 
-                          5, 
-                          palm_color, 
-                          -1)  # Filled
-                
-                # Show palm size as text if in debug mode
+                # Show collision radius as text if in debug mode
                 if DEBUG_MODE:
                     cv2.putText(canvas, 
-                               f"{int(palm_size)}", 
-                               (int(palm_pos[0] + palm_size), int(palm_pos[1])),
-                               cv2.FONT_HERSHEY_SIMPLEX, 0.5, palm_color, 1)
+                               f"{int(radius)}", 
+                               (int(fingertip_pos[0] + 10), int(fingertip_pos[1])),
+                               cv2.FONT_HERSHEY_SIMPLEX, 0.4, hand_color, 1)
         
         # Draw game elements only during gameplay
         if menu.is_playing():
