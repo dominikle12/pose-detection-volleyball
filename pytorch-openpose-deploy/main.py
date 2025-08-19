@@ -813,12 +813,13 @@ def check_palm_collision():
                     if current_score > high_score:
                         high_score = current_score
                     
-                    # Show shot message only for specific volleyball shots
-                    volleyball_shots = ["SPIKE!", "SET SHOT!", "DIG SHOT!", "BUMP PASS!"]
+                    # Show shot message for volleyball shots
+                    volleyball_shots = ["SMASH!", "SET!", "DIG!"]
                     
                     if shot_name and shot_name in volleyball_shots:
+                        # Show shot name with bonus points
                         if bonus_points > 0:
-                            shot_message = f"{shot_name} +{bonus_points} bonus!"
+                            shot_message = f"{shot_name} +{bonus_points} pts!"
                         else:
                             shot_message = shot_name
                         shot_message_time = time.time()
@@ -847,13 +848,13 @@ def check_palm_collision():
 
 def detect_volleyball_shot(hand_positions, ball_pos, velocity_before, velocity_after):
     """
-    Enhanced volleyball shot detection with better validation for hand segments
+    Simplified volleyball shot detection for Dig, Set, and Smash only.
     Returns: (shot_name, bonus_points) or (None, 0)
     """
     global last_volleyball_shot_time
     
     # Reduced cooldown for better responsiveness
-    if time.time() - last_volleyball_shot_time < 0.3:
+    if time.time() - last_volleyball_shot_time < 0.5:
         return None, 0
     
     # Check if we have enough velocity change to be a meaningful hit
@@ -861,39 +862,31 @@ def detect_volleyball_shot(hand_positions, ball_pos, velocity_before, velocity_a
     velocity_magnitude_after = np.linalg.norm(velocity_after)
     velocity_change = abs(velocity_magnitude_after - velocity_magnitude_before)
     
-    if velocity_change < 2.0:  # Minimum velocity change for a valid hit
+    if velocity_change < 3.0:  # Higher threshold for cleaner detection
         return None, 0
     
-    # Must have upward velocity component after hit for volleyball shots
-    if velocity_after[1] > -1.0:  # Ball must move upward (negative Y)
+    # Must have upward velocity component after hit
+    if velocity_after[1] > -2.0:  # Ball must move upward with decent force
         return None, 0
     
-    # Single hand shots (easier to detect)
+    # Get hand position(s) for shot analysis
+    if len(hand_positions) == 0:
+        return None, 0
+    
+    # SMASH detection - Single hand, high velocity, hand above ball
     if len(hand_positions) == 1:
         hand = hand_positions[0]
-        # Use fingertip position as reference point for shot detection
         hand_pos = np.array(hand["fingertips"])
         
-        # SPIKE: High velocity, downward angle, hand above ball
-        if (velocity_magnitude_after > 8.0 and 
-            hand_pos[1] < ball_pos[1] - 30 and  # Hand well above ball
-            velocity_after[1] > -20):  # Strong upward component
+        # SMASH: High velocity downward strike with hand above ball
+        if (velocity_magnitude_after > 10.0 and 
+            hand_pos[1] < ball_pos[1] - 25 and  # Hand well above ball
+            velocity_after[1] < -8.0):  # Strong downward-then-upward motion
             last_volleyball_shot_time = time.time()
-            return "SPIKE!", 5
-        
-        # OVERHEAD HIT: Medium velocity, hand above ball
-        elif (velocity_magnitude_after > 5.0 and 
-              hand_pos[1] < ball_pos[1] - 20):
-            last_volleyball_shot_time = time.time()
-            return "OVERHEAD!", 3
-        
-        # UNDERHAND HIT: Hand below ball
-        elif hand_pos[1] > ball_pos[1] + 20:
-            last_volleyball_shot_time = time.time()
-            return "UNDERHAND!", 2
+            return "SMASH!", 5
     
-    # Two-handed shots
-    elif len(hand_positions) >= 2:
+    # SET and DIG detection - Two-handed shots
+    if len(hand_positions) >= 2:
         left_hand = None
         right_hand = None
         
@@ -907,37 +900,30 @@ def detect_volleyball_shot(hand_positions, ball_pos, velocity_before, velocity_a
             left_pos = np.array(left_hand["fingertips"])
             right_pos = np.array(right_hand["fingertips"])
             
-            # Calculate distance between hands
+            # Calculate distance between hands and average position
             hand_distance = np.linalg.norm(left_pos - right_pos)
             avg_hand_pos = (left_pos + right_pos) / 2
             
-            # SET SHOT: Both hands above ball, close together, gentle velocity
-            if (hand_distance < 100 and 
-                avg_hand_pos[1] < ball_pos[1] - 40 and  # Hands above ball
-                velocity_magnitude_after < 12.0 and     # Gentle hit
-                velocity_after[1] < -3.0):              # Good upward component
-                last_volleyball_shot_time = time.time()
-                return "SET SHOT!", 4
-            
-            # DIG SHOT: Hands close together, below ball, strong upward velocity
-            elif (hand_distance < 120 and 
-                  avg_hand_pos[1] > ball_pos[1] + 10 and  # Hands below ball
-                  velocity_after[1] < -5.0):               # Strong upward velocity
-                last_volleyball_shot_time = time.time()
-                return "DIG SHOT!", 4
-            
-            # BUMP PASS: Hands moderately close, at ball level
-            elif (hand_distance < 150 and 
-                  abs(avg_hand_pos[1] - ball_pos[1]) < 40 and
-                  velocity_after[1] < -3.0):
-                last_volleyball_shot_time = time.time()
-                return "BUMP PASS!", 3
+            # Hands must be reasonably close together for team shots
+            if hand_distance < 150:
+                
+                # SET: Hands raised high (overhead position) and ball goes up
+                # Use simple screen position - if hands are in upper portion of screen, it's overhead
+                screen_upper_third = ball_pos[1] - 200  # Generous overhead zone
+                
+                if (avg_hand_pos[1] < screen_upper_third and  # Hands raised high (overhead)
+                    velocity_magnitude_after >= 3.0 and velocity_magnitude_after <= 15.0 and  # Controlled velocity
+                    velocity_after[1] < -3.0):  # Ball goes up
+                    last_volleyball_shot_time = time.time()
+                    return "SET!", 3
+                
+                # DIG: Forearm pass, hands at or below ball level, strong upward motion
+                elif (avg_hand_pos[1] >= ball_pos[1] - 10 and  # Hands at or below ball
+                      velocity_after[1] < -6.0):  # Strong upward velocity (defensive save)
+                    last_volleyball_shot_time = time.time()
+                    return "DIG!", 4
     
-    # Default good hit (if no specific shot detected but hit was valid)
-    if velocity_change > 3.0 and velocity_after[1] < -2.0:
-        last_volleyball_shot_time = time.time()
-        return "GOOD HIT!", 1
-    
+    # No specific shot detected
     return None, 0
 
 def scale_keypoints(candidate, subset, scale_factor=1.0):
