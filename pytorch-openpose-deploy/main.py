@@ -876,15 +876,11 @@ def detect_volleyball_shot(hand_positions, ball_pos, velocity_before, velocity_a
     if len(hand_positions) == 0:
         return None, 0
     
-    # SMASH detection - Single hand, high velocity, hand above ball
+    # SMASH detection - Single hand, hard hit with strong horizontal velocity
     if len(hand_positions) == 1:
-        hand = hand_positions[0]
-        hand_pos = np.array(hand["fingertips"])
-        
-        # SMASH: High velocity downward strike with hand above ball
-        if (velocity_magnitude_after > 10.0 and 
-            hand_pos[1] < ball_pos[1] - 25 and  # Hand well above ball
-            velocity_after[1] < -8.0):  # Strong downward-then-upward motion
+        # SMASH: Hard hit that sends ball flying horizontally
+        if (velocity_magnitude_after > 12.0 and  # High velocity hit
+            abs(velocity_after[0]) > 8.0):  # Strong horizontal component (left or right)
             last_volleyball_shot_time = time.time()
             return "SMASH!", 5
     
