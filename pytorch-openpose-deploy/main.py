@@ -793,8 +793,11 @@ def check_palm_collision():
                 
                 last_hit_time = current_time
                 
-                # Detect volleyball shot type first
-                shot_name, bonus_points = detect_volleyball_shot(palm_positions, ball_pos, velocity_before, ball_velocity)
+                # Detect volleyball shot type first (pass keypoint data for head detection)
+                keypoint_data = last_valid_keypoints if 'last_valid_keypoints' in globals() else (None, None)
+                shot_name, bonus_points = detect_volleyball_shot(palm_positions, ball_pos, velocity_before, ball_velocity, 
+                                                                keypoint_data[0] if keypoint_data[0] is not None else None,
+                                                                keypoint_data[1] if keypoint_data[1] is not None else None)
                 
                 # Immediate validation based on velocity change (no threading)
                 velocity_magnitude_before = np.linalg.norm(velocity_before)
@@ -846,7 +849,7 @@ def check_palm_collision():
     
     return collision_happened
 
-def detect_volleyball_shot(hand_positions, ball_pos, velocity_before, velocity_after):
+def detect_volleyball_shot(hand_positions, ball_pos, velocity_before, velocity_after, candidate=None, subset=None):
     """
     Simplified volleyball shot detection for Dig, Set, and Smash only.
     Returns: (shot_name, bonus_points) or (None, 0)
@@ -907,12 +910,32 @@ def detect_volleyball_shot(hand_positions, ball_pos, velocity_before, velocity_a
             # Hands must be reasonably close together for team shots
             if hand_distance < 150:
                 
-                # SET: Hands raised high (overhead position) and ball goes up
-                # Use simple screen position - if hands are in upper portion of screen, it's overhead
-                screen_upper_third = ball_pos[1] - 200  # Generous overhead zone
+                # SET: Simplified detection - hands and ball both above head level
+                # Use actual head keypoints if available, otherwise fall back to screen position
+                head_y = None
                 
-                if (avg_hand_pos[1] < screen_upper_third and  # Hands raised high (overhead)
-                    velocity_magnitude_after >= 3.0 and velocity_magnitude_after <= 15.0 and  # Controlled velocity
+                if candidate is not None and subset is not None and len(subset) > 0:
+                    # Find the person with hands (assuming first person for simplicity)
+                    for person_idx in range(len(subset)):
+                        # Check for nose (keypoint 0) or neck (keypoint 1) 
+                        nose_idx = int(subset[person_idx][0])  # Nose
+                        neck_idx = int(subset[person_idx][1])  # Neck
+                        
+                        if (nose_idx != -1 and nose_idx < len(candidate) and 
+                            candidate[nose_idx][2] > KEYPOINT_CONFIDENCE_THRESHOLD):
+                            head_y = candidate[nose_idx][1]
+                            break
+                        elif (neck_idx != -1 and neck_idx < len(candidate) and 
+                              candidate[neck_idx][2] > KEYPOINT_CONFIDENCE_THRESHOLD):
+                            head_y = candidate[neck_idx][1] 
+                            break
+                
+                # Fall back to screen position if no head keypoints found
+                if head_y is None:
+                    head_y = CANVAS_HEIGHT // 3
+                
+                if (avg_hand_pos[1] < head_y and  # Hands above head level
+                    ball_pos[1] < head_y and  # Ball also above head level
                     velocity_after[1] < -3.0):  # Ball goes up
                     last_volleyball_shot_time = time.time()
                     return "SET!", 3
