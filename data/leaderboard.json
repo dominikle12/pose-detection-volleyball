@@ -1,0 +1,121 @@
+[
+  {
+    "player_name": "1",
+    "score": 116,
+    "game_duration": 46.1,
+    "date": "2025-08-18 15:42:05",
+    "timestamp": 1755531725.628173
+  },
+  {
+    "player_name": "1",
+    "score": 18,
+    "game_duration": 21.2,
+    "date": "2025-08-18 15:30:34",
+    "timestamp": 1755531034.413641
+  },
+  {
+    "player_name": "aaaa",
+    "score": 16,
+    "game_duration": 20.6,
+    "date": "2025-08-14 15:47:33",
+    "timestamp": 1755186453.348717
+  },
+  {
+    "player_name": "domo",
+    "score": 13,
+    "game_duration": 10.6,
+    "date": "2025-08-14 15:29:44",
+    "timestamp": 1755185384.212986
+  },
+  {
+    "player_name": "1",
+    "score": 8,
+    "game_duration": 54.8,
+    "date": "2025-08-20 19:48:52",
+    "timestamp": 1755719332.576779
+  },
+  {
+    "player_name": "aaaa",
+    "score": 7,
+    "game_duration": 13.4,
+    "date": "2025-08-16 19:16:02",
+    "timestamp": 1755371762.462376
+  },
+  {
+    "player_name": "domo",
+    "score": 7,
+    "game_duration": 25.9,
+    "date": "2025-08-12 15:58:45",
+    "timestamp": 1755014325.940788
+  },
+  {
+    "player_name": "1",
+    "score": 6,
+    "game_duration": 8.0,
+    "date": "2025-09-27 19:40:04",
+    "timestamp": 1758994804.678418
+  },
+  {
+    "player_name": "123",
+    "score": 5,
+    "game_duration": 18.0,
+    "date": "2025-09-27 19:34:16",
+    "timestamp": 1758994456.426558
+  },
+  {
+    "player_name": "1",
+    "score": 4,
+    "game_duration": 12.2,
+    "date": "2025-09-27 19:40:18",
+    "timestamp": 1758994818.089949
+  },
+  {
+    "player_name": "23",
+    "score": 3,
+    "game_duration": 5.3,
+    "date": "2025-08-14 16:10:42",
+    "timestamp": 1755187842.048794
+  },
+  {
+    "player_name": "asdads",
+    "score": 3,
+    "game_duration": 6.0,
+    "date": "2025-09-08 12:38:01",
+    "timestamp": 1757335081.619424
+  },
+  {
+    "player_name": "1111",
+    "score": 3,
+    "game_duration": 43.4,
+    "date": "2025-08-18 15:21:58",
+    "timestamp": 1755530518.288689
+  },
+  {
+    "player_name": "aad",
+    "score": 2,
+    "game_duration": 5.5,
+    "date": "2025-08-14 15:38:03",
+    "timestamp": 1755185883.86492
+  },
+  {
+    "player_name": "111",
+    "score": 2,
+    "game_duration": 6.4,
+    "date": "2025-08-28 16:10:37",
+    "timestamp": 1756397437.135378
+  },
+  {
+    "player_name": "123",
+    "score": 1,
+    "game_duration": 8.8,
+    "date": "2025-09-27 19:30:57",
+    "timestamp": 1758994257.35096
+  },
+  {
+    "player_name": "123",
+    "score": 1,
+    "game_duration": 20.3,
+    "date": "2025-08-19 08:22:37",
+    "timestamp": 1755591757.082296
+  }
+]
